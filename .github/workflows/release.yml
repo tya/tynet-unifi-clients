@@ -1,0 +1,49 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish .deb
+    runs-on: ubuntu-latest
+    env:
+      NFPM_VERSION: 2.46.3
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # tags + history for `git describe`
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install nfpm
+        run: |
+          curl -sSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build .deb
+        run: make deb VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.deb --generate-notes
+
+      - name: Notify tynet-apt
+        env:
+          GH_TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VER="${VERSION#v}"
+          gh api -X POST /repos/tya/tynet-apt/dispatches \
+            -f event_type=new-release \
+            -F client_payload[repo]="${{ github.repository }}" \
+            -F client_payload[tag]="$VERSION" \
+            -F client_payload[package]=tynet-unifi-clients \
+            -F client_payload[asset_url]="https://github.com/${{ github.repository }}/releases/download/${VERSION}/tynet-unifi-clients_${VER}_arm64.deb"

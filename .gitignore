@@ -1,4 +1,5 @@
 bin/
+dist/
 /tynet-unifi-clients
 coverage.out
 coverage.html
