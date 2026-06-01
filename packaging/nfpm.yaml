@@ -1,0 +1,30 @@
+name: tynet-unifi-clients
+arch: arm64
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: Ty Alexander <ty.alexander@gmail.com>
+description: |
+  Sync per-client VLAN overrides from Ansible inventory to a UniFi controller.
+  Reads inventory/clients/<mac>.yml records as the source of truth and
+  reconciles them into the controller via the UniFi REST API.
+homepage: https://github.com/tya/tynet-unifi-clients
+license: Proprietary
+contents:
+  - src: ./tynet-unifi-clients
+    dst: /usr/bin/tynet-unifi-clients
+    file_info:
+      mode: 0755
+  - src: ./packaging/copyright
+    dst: /usr/share/doc/tynet-unifi-clients/copyright
+    file_info:
+      mode: 0644
+  - src: ./dist/changelog.gz
+    dst: /usr/share/doc/tynet-unifi-clients/changelog.gz
+    file_info:
+      mode: 0644
+  - src: ./packaging/lintian-overrides
+    dst: /usr/share/lintian/overrides/tynet-unifi-clients
+    file_info:
+      mode: 0644
