@@ -11,6 +11,17 @@ description: |
   reconciles them into the controller via the UniFi REST API.
 homepage: https://github.com/tya/tynet-unifi-clients
 license: Proprietary
+# Optional deb-level GPG signing. nfpm embeds a `_gpgorigin` ar member that
+# can be verified by `dpkg-sig --verify`. When NFPM_DEB_KEY_FILE points at a
+# private key file, nfpm signs; when unset (local dev), the .deb is built
+# unsigned. The passphrase comes from NFPM_DEB_PASSPHRASE in the environment
+# (nfpm reads it implicitly; not configured in YAML). The release workflow
+# writes the key from TYNET_APT_GPG_KEY (same key tynet-apt uses to sign
+# Release/InRelease, fingerprint 47AA8444945F450A).
+deb:
+  signature:
+    key_file: ${NFPM_DEB_KEY_FILE}
+    type: origin
 contents:
   - src: ./tynet-unifi-clients
     dst: /usr/bin/tynet-unifi-clients

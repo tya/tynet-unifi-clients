@@ -27,8 +27,24 @@ jobs:
             | sudo tar -xz -C /usr/local/bin nfpm
           nfpm --version
 
-      - name: Build .deb
+      - name: Stage GPG signing key
+        env:
+          TYNET_APT_GPG_KEY: ${{ secrets.TYNET_APT_GPG_KEY }}
+          TYNET_APT_GPG_PASSPHRASE: ${{ secrets.TYNET_APT_GPG_PASSPHRASE }}
+        run: |
+          KEY_FILE="$RUNNER_TEMP/tynet-apt-signing.key"
+          printf '%s' "$TYNET_APT_GPG_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          echo "NFPM_DEB_KEY_FILE=$KEY_FILE" >> "$GITHUB_ENV"
+          echo "NFPM_DEB_PASSPHRASE=$TYNET_APT_GPG_PASSPHRASE" >> "$GITHUB_ENV"
+
+      - name: Build .deb (signed)
         run: make deb VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: Verify deb signature
+        run: |
+          sudo apt-get update && sudo apt-get install -y dpkg-sig
+          dpkg-sig --verify dist/*.deb
 
       - name: Publish GitHub Release
         env:
