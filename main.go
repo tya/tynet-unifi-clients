@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,11 +35,13 @@ import (
 // Same pattern as radius-user-importer.
 var exit = os.Exit
 
-// stdout/stderr are variables so tests can capture output.
+// stdout/stderr/stdin are variables so tests can capture output and feed
+// scripted input. Typed as interfaces (not *os.File) so a strings.Builder /
+// strings.Reader works.
 var (
-	stdout = os.Stdout
-	stderr = os.Stderr
-	stdin  = os.Stdin
+	stdout io.Writer = os.Stdout
+	stderr io.Writer = os.Stderr
+	stdin  io.Reader = os.Stdin
 )
 
 func main() {
@@ -93,9 +96,10 @@ Subcommands:
   pull       Read-only drift report suitable for CI cron.
 
 Common flags:
-  --inventory-path PATH   Directory holding clients/<mac>.yml; default: $UNIFI_ANSIBLE_INVENTORY
+  --inventory-path PATH   Directory holding clients/<mac>.yml; default: $UNIFI_ANSIBLE_INVENTORY,
                           or walk up from cwd to find ansible.cfg's sibling
-                          inventory/clients dir.
+                          inventory/clients dir, or
+                          $HOME/src/tynet-infra/inventory/clients if it exists.
   --unifi-base URL        UniFi controller base URL (no /api suffix).
                           Default: https://unifi.tynet.us
   --insecure              Skip TLS verification. Default: true (matches the
@@ -122,9 +126,17 @@ func registerCommon(fs *flag.FlagSet) *common {
 	return c
 }
 
+// devDefaultInventory is the last-resort path tried during local development
+// when no flag, env var, or walk-up discovery finds an inventory. Surfaced
+// only if the directory actually exists, so production hosts (where
+// tynet-infra is not checked out under $HOME) still error cleanly and force
+// the operator to set the env var via Ansible / /etc/default.
+const devDefaultInventory = "src/tynet-infra/inventory/clients"
+
 // resolveInventoryPath returns the final inventory directory to use.
 // Precedence: --inventory-path flag → $UNIFI_ANSIBLE_INVENTORY env →
-// walk up from cwd looking for ansible.cfg + inventory/clients sibling.
+// walk up from cwd looking for ansible.cfg + inventory/clients sibling →
+// $HOME/src/tynet-infra/inventory/clients if it exists (dev convenience).
 func (c *common) resolveInventoryPath() (string, error) {
 	if c.inventoryPath != "" {
 		return c.inventoryPath, nil
@@ -149,6 +161,12 @@ func (c *common) resolveInventoryPath() (string, error) {
 			break
 		}
 		dir = parent
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, devDefaultInventory)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
 	}
 	return "", fmt.Errorf("%w: pass --inventory-path or set UNIFI_ANSIBLE_INVENTORY", errInventoryNotFound)
 }
