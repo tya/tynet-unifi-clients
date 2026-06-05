@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/zoullx/unifi-go/unifi"
@@ -42,6 +43,32 @@ func TestNetworkBySubnet(t *testing.T) {
 	}
 }
 
+func TestNetworkBySubnet_SkipsEmptyAndMalformed(t *testing.T) {
+	// Order matters: the searched subnet matches "n3", so the loop has to
+	// pass over the empty-IPSubnet entry (n1) and the malformed-IPSubnet
+	// entry (n2) before finding it. Covers both continue arms.
+	nets := []unifi.Network{
+		{ID: "n1", Name: "no-subnet"},
+		{ID: "n2", Name: "garbage-subnet", IPSubnet: "not-a-cidr"},
+		{ID: "n3", Name: "Main", IPSubnet: "10.0.60.1/24"},
+	}
+	got, err := networkBySubnet(nets, "10.0.60.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "n3" {
+		t.Errorf("want n3, got %s", got.ID)
+	}
+}
+
+func TestNetworkBySubnet_BadInput(t *testing.T) {
+	// Bad input subnet → wrapped parse error.
+	_, err := networkBySubnet(nil, "not-a-cidr")
+	if err == nil || !strings.Contains(err.Error(), "subnet \"not-a-cidr\"") {
+		t.Fatalf("want subnet-parse wrap, got %v", err)
+	}
+}
+
 func TestNetworkBySubnet_NotFound(t *testing.T) {
 	nets := []unifi.Network{
 		{ID: "n1", Name: "Main", IPSubnet: "10.0.60.1/24"},
@@ -49,6 +76,21 @@ func TestNetworkBySubnet_NotFound(t *testing.T) {
 	_, err := networkBySubnet(nets, "10.0.70.0/24")
 	if err == nil {
 		t.Fatal("want error, got nil")
+	}
+}
+
+func TestNewUnifiClient_InvalidConfig(t *testing.T) {
+	// Empty URL fails the `validate:"required,http_url"` constraint on
+	// ClientConfig.URL before any HTTP is attempted. Covers the error-wrap
+	// branch in newUnifiClient. The success branch dials the controller
+	// (NewClient does a login + system-info fetch), so we deliberately do
+	// not exercise it here — see the plan's out-of-scope list.
+	_, err := newUnifiClient("", "any-key", true)
+	if err == nil {
+		t.Fatal("want error for empty URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "create unifi client") {
+		t.Errorf("want wrap prefix %q, got %v", "create unifi client", err)
 	}
 }
 

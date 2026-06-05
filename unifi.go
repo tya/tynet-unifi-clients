@@ -25,7 +25,10 @@ type unifiAPI interface {
 // newUnifiClient constructs the upstream zoullx client. APIKey auth only;
 // VerifySSL=false matches the existing playbook's validate_certs: false.
 // ValidationMode=Disable matches radius-user-importer's choice.
-func newUnifiClient(baseURL, apiKey string, insecure bool) (unifiAPI, error) {
+//
+// Declared as a var so tests can swap in a fake unifiAPI without standing up
+// an HTTP server.
+var newUnifiClient = func(baseURL, apiKey string, insecure bool) (unifiAPI, error) {
 	c, err := unifi.NewClient(&unifi.ClientConfig{
 		URL:            baseURL,
 		APIKey:         apiKey,

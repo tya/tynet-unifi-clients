@@ -179,6 +179,143 @@ func TestWriteClientFile_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestLoadClients_NotADirectory(t *testing.T) {
+	// Pointing inventory at a regular file should fail cleanly with the
+	// inventory-not-found sentinel.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file-not-dir")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadClients(path)
+	if !errors.Is(err, errInventoryNotFound) {
+		t.Fatalf("want errInventoryNotFound, got %v", err)
+	}
+}
+
+func TestLoadClients_InvalidYAML(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "aa-bb-cc-dd-ee-ff.yml"),
+		"mac: [unterminated\n")
+	_, err := loadClients(dir)
+	if err == nil {
+		t.Fatal("want yaml error, got nil")
+	}
+}
+
+func TestLoadClients_InvalidSwitchMAC(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "aa-bb-cc-dd-ee-ff.yml"), `---
+mac: aa:bb:cc:dd:ee:ff
+name: x
+vlan_id: 70
+connection: wired
+switch_mac: not-a-mac
+switch_port: 14
+`)
+	_, err := loadClients(dir)
+	if !errors.Is(err, errInvalidMAC) {
+		t.Fatalf("want errInvalidMAC for switch_mac, got %v", err)
+	}
+}
+
+func TestLoadClients_IgnoresNonYAMLFiles(t *testing.T) {
+	// README, .DS_Store, *.txt etc. in the inventory dir should be silently
+	// skipped — only *.yml files are loaded. Covers the suffix-skip branch.
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "README"), "just notes\n")
+	writeFile(t, filepath.Join(dir, ".DS_Store"), "")
+	writeFile(t, filepath.Join(dir, "aa-bb-cc-dd-ee-ff.yml"), `---
+mac: aa:bb:cc:dd:ee:ff
+name: x
+vlan_id: 70
+`)
+	clients, err := loadClients(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clients) != 1 {
+		t.Errorf("want 1 client, got %d", len(clients))
+	}
+}
+
+func TestWriteClientFile_InvalidMAC(t *testing.T) {
+	// Path-level guard: writeClientFile re-validates the MAC before computing
+	// the on-disk filename so a caller can't trick it into writing
+	// "not-a-mac.yml".
+	_, err := writeClientFile(t.TempDir(), Client{MAC: "not-a-mac", VLANID: 70})
+	if !errors.Is(err, errInvalidMAC) {
+		t.Fatalf("want errInvalidMAC, got %v", err)
+	}
+}
+
+func TestLoadHostVarMACs_MissingDir(t *testing.T) {
+	// host_vars dir is optional — a missing path should produce an empty map,
+	// not an error (bootstrap's --host-vars-dir is similarly optional).
+	macs, err := loadHostVarMACs(filepath.Join(t.TempDir(), "nope"), "")
+	if err != nil {
+		t.Fatalf("want nil error for missing dir, got %v", err)
+	}
+	if len(macs) != 0 {
+		t.Errorf("want empty map, got %v", macs)
+	}
+}
+
+func TestLoadHostVarMACs_MalformedFilesSkipped(t *testing.T) {
+	// host_vars contains many non-MAC files (certbot, etc.). Malformed YAML
+	// and missing-MAC files should be silently skipped; only valid node_mac
+	// entries land in the result.
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "bad.yml"), "mac: [unterminated\n")
+	writeFile(t, filepath.Join(dir, "no-mac.yml"), "certbot_email: foo@example.com\n")
+	writeFile(t, filepath.Join(dir, "bad-mac.yml"), "node_mac: zz:zz:zz:zz:zz:zz\n")
+	// Nested directory: loadHostVarMACs uses ReadDir, not WalkDir, but the
+	// dir entry should still be skipped via the IsDir branch.
+	if err := os.MkdirAll(filepath.Join(dir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "ok.yml"), "node_mac: dc-a6-32-8d-f3-ca\n")
+	macs, err := loadHostVarMACs(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(macs) != 1 {
+		t.Errorf("want 1 mac (only ok.yml), got %v", macs)
+	}
+	if _, ok := macs["dc:a6:32:8d:f3:ca"]; !ok {
+		t.Errorf("expected mac missing from %v", macs)
+	}
+}
+
+func TestLoadHostVarMACs_BogusKickstart(t *testing.T) {
+	// A non-MAC kickstart_mac value in group_vars/all.yml is dropped silently
+	// rather than failing the whole load.
+	dir := t.TempDir()
+	groupVarsAll := filepath.Join(dir, "all.yml")
+	writeFile(t, groupVarsAll, "kickstart_mac: not-a-mac\n")
+	macs, err := loadHostVarMACs(filepath.Join(t.TempDir(), "no-host-vars"), groupVarsAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(macs) != 0 {
+		t.Errorf("bogus kickstart_mac should be dropped, got %v", macs)
+	}
+}
+
+func TestLoadHostVarMACs_MalformedGroupVars(t *testing.T) {
+	// Malformed group_vars/all.yml is silently skipped — no error.
+	dir := t.TempDir()
+	groupVarsAll := filepath.Join(dir, "all.yml")
+	writeFile(t, groupVarsAll, "kickstart_mac: [unterminated\n")
+	macs, err := loadHostVarMACs(filepath.Join(t.TempDir(), "no-host-vars"), groupVarsAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(macs) != 0 {
+		t.Errorf("malformed group_vars should yield empty map, got %v", macs)
+	}
+}
+
 func TestLoadHostVarMACs(t *testing.T) {
 	dir := t.TempDir()
 	hostVars := filepath.Join(dir, "host_vars")

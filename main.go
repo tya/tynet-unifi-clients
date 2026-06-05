@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,11 +35,13 @@ import (
 // Same pattern as radius-user-importer.
 var exit = os.Exit
 
-// stdout/stderr are variables so tests can capture output.
+// stdout/stderr/stdin are variables so tests can capture output and feed
+// scripted input. Typed as interfaces (not *os.File) so a strings.Builder /
+// strings.Reader works.
 var (
-	stdout = os.Stdout
-	stderr = os.Stderr
-	stdin  = os.Stdin
+	stdout io.Writer = os.Stdout
+	stderr io.Writer = os.Stderr
+	stdin  io.Reader = os.Stdin
 )
 
 func main() {
