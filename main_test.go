@@ -82,6 +82,10 @@ func swapGlobals(t *testing.T, apiOverride unifiAPI, stdinInput string) *testEnv
 		}
 	}
 	t.Setenv("UNIFI_API_KEY", "test-key")
+	// Isolate HOME so the dev-default branch in resolveInventoryPath can't
+	// accidentally find the developer's real ~/src/tynet-infra checkout
+	// during tests that expect "no inventory anywhere".
+	t.Setenv("HOME", t.TempDir())
 
 	t.Cleanup(func() {
 		stdout, stderr, stdin = origStdout, origStderr, origStdin
@@ -235,6 +239,7 @@ func TestRequireAPIKey(t *testing.T) {
 // --- resolveInventoryPath ---
 
 func TestResolveInventoryPath_FlagWins(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	c := &common{inventoryPath: "/explicit"}
 	got, err := c.resolveInventoryPath()
 	if err != nil || got != "/explicit" {
@@ -243,6 +248,7 @@ func TestResolveInventoryPath_FlagWins(t *testing.T) {
 }
 
 func TestResolveInventoryPath_EnvWins(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("UNIFI_ANSIBLE_INVENTORY", "/from-env")
 	c := &common{}
 	got, err := c.resolveInventoryPath()
@@ -254,6 +260,7 @@ func TestResolveInventoryPath_EnvWins(t *testing.T) {
 func TestResolveInventoryPath_WalkUp(t *testing.T) {
 	// Stage a fake project: <root>/ansible.cfg, <root>/inventory/clients/,
 	// chdir into a sub-sub-dir, expect the walk-up to discover it.
+	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "ansible.cfg"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -290,11 +297,46 @@ func TestResolveInventoryPath_WalkUp(t *testing.T) {
 	}
 }
 
+func TestResolveInventoryPath_DevDefault(t *testing.T) {
+	// Last-resort branch: $HOME/src/tynet-infra/inventory/clients exists →
+	// resolveInventoryPath returns it. Used so developers don't need to
+	// pass --inventory-path or set $UNIFI_ANSIBLE_INVENTORY when working
+	// out of $HOME/src/tynet-unifi-clients.
+	home := t.TempDir()
+	want := filepath.Join(home, devDefaultInventory)
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("UNIFI_ANSIBLE_INVENTORY", "")
+
+	// chdir to a clean tempdir so the walk-up search fails before the
+	// dev-default branch runs.
+	tmp := t.TempDir()
+	prev, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	c := &common{}
+	got, err := c.resolveInventoryPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotReal, _ := filepath.EvalSymlinks(got)
+	wantReal, _ := filepath.EvalSymlinks(want)
+	if gotReal != wantReal {
+		t.Errorf("dev default: got %q, want %q", got, want)
+	}
+}
+
 func TestResolveInventoryPath_NotFound(t *testing.T) {
 	// chdir into a tmpdir with no ansible.cfg anywhere above; expect error.
 	// We can't reliably guarantee no ansible.cfg exists in any parent of an
 	// arbitrary tempdir, but t.TempDir() on the testing root is sufficient
-	// in practice.
+	// in practice. HOME is isolated so the dev-default fallback can't fire.
+	t.Setenv("HOME", t.TempDir())
 	tmp := t.TempDir()
 	prevCWD, err := os.Getwd()
 	if err != nil {

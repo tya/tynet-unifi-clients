@@ -27,6 +27,14 @@ Common flags: `--inventory-path PATH`, `--unifi-base URL` (default
 `https://unifi.tynet.us`), `--insecure` (default true, matches `tynet-infra`
 playbook's `validate_certs: false`).
 
+If `--inventory-path` and `$UNIFI_ANSIBLE_INVENTORY` are both unset, the tool
+walks up from `cwd` looking for an `ansible.cfg` whose sibling
+`inventory/clients/` exists, then falls back to
+`$HOME/src/tynet-infra/inventory/clients` if it exists — so local development
+out of `~/src/tynet-unifi-clients` works without extra config. Production
+hosts (where tynet-infra isn't checked out under `$HOME`) skip the fallback
+and require the env var, which `roles/nodes` sets via Ansible.
+
 `apply`-only: `--yes`, `--limit <mac>` (repeatable), `--allow-large`.
 `bootstrap`-only: `--write` (without it, prints what would be written).
 
