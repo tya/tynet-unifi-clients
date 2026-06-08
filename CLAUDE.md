@@ -48,10 +48,11 @@ Run a single test: `go test -race -run TestBuild_Update ./...` (single package
 - `main()` calls `run(args []string) error` and translates the returned error
   to an exit code. `driftError` is a typed error that maps to exit code 2 (so
   CI cron can distinguish "drift" from "broken").
-- `var exit = os.Exit`, `var stdout/stderr/stdin = os.Std*` are test seams.
-- Tests spin a real TLS server with `httptest.NewTLSServer` and a fake UniFi
-  responder rather than mocking the upstream interface — except for reconciler
-  tests, which use the `unifiAPI` interface in `unifi.go` to swap a fake in.
+- `var exit = os.Exit`, `var stdout/stderr/stdin = os.Std*`, and
+  `var newUnifiClient = func(...)` are test seams. `main_test.go`'s
+  `fakeUnifiAPI` (impl of the `unifiAPI` interface in `unifi.go`) is the
+  canonical stub — no `httptest` fixture; the real `newUnifiClient` body
+  dials the controller, so it's only exercised on its error path.
 
 **Reconciler is pure.** `sync.go:Build(desired, actual, networks) Plan` does no
 I/O. It takes inventory clients + controller state and returns an ordered
