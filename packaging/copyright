@@ -1,9 +1,0 @@
-Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: tynet-unifi-clients
-Upstream-Contact: Ty Alexander <ty.alexander@gmail.com>
-Source: https://github.com/tya/tynet-unifi-clients
-
-Files: *
-Copyright: 2026 Ty Alexander
-License: Proprietary
- All rights reserved.

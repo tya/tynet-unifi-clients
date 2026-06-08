@@ -1268,9 +1268,9 @@ func TestBootstrapCandidates_NetworkVLAN0FallsBackToIP(t *testing.T) {
 
 func TestVLANFromIP(t *testing.T) {
 	cases := []struct {
-		ip      string
-		want    int
-		wantOK  bool
+		ip     string
+		want   int
+		wantOK bool
 	}{
 		{"10.0.70.42", 70, true},
 		{"10.0.1.1", 1, true},
