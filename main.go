@@ -328,8 +328,8 @@ func runBootstrap(args []string) error {
 
 	candidates, skipped := bootstrapCandidates(users, netByID, guestIDs, skipMACs)
 
-	fmt.Fprintf(stderr, "controller has %d users; skipping %d (%d guest, %d host_vars-managed)\n",
-		len(users), skipped.total, skipped.guest, skipped.managed)
+	fmt.Fprintf(stderr, "controller has %d users; skipping %d (%d guest, %d host_vars-managed, %d no-vlan-signal)\n",
+		len(users), skipped.total, skipped.guest, skipped.managed, skipped.noVLAN)
 
 	if len(candidates) == 0 {
 		fmt.Fprintln(stdout, "no new clients to bootstrap")
@@ -356,14 +356,42 @@ func runBootstrap(args []string) error {
 	return nil
 }
 
-type bootstrapSkipped struct{ total, guest, managed int }
+type bootstrapSkipped struct{ total, guest, managed, noVLAN int }
 
 // bootstrapCandidates turns the controller's raw user list into Client
-// records suitable for writing to inventory/clients/. Guests and
-// host_vars-managed MACs are excluded. Users on a network with no
-// resolvable VLAN are excluded (e.g. WAN clients). Users with no fixed_ip
-// are still included; vlan is derived from network membership.
+// records suitable for writing to inventory/clients/.
+//
+// VLAN derivation, in order:
+//  1. Network.VLAN from the user's network_id (when both are set and VLAN > 0)
+//  2. third octet of FixedIP (per "third octet = VLAN" convention)
+//  3. third octet of observed IP
+//
+// Why the fallback exists: UniFi accumulates stale client records whose
+// network_id is null (legacy entries, wifi-only clients that never had a
+// fixed network profile). They have an observed IP from their last
+// association, which under our convention is enough to recover the VLAN.
+//
+// Skip rules:
+//   - invalid MAC → silent (never counted; usually decommissioned vendor
+//     garbage that doesn't deserve attention)
+//   - host_vars-managed MAC → s.managed (pi2/pi3/kickstart, owned by the
+//     existing unifi-reservations.yml playbook)
+//   - on a network whose purpose is "guest" → s.guest
+//   - derived VLAN matches a guest network's VLAN → s.guest (catches stale
+//     clients whose last-seen IP was on guest, even though their
+//     network_id is null)
+//   - no VLAN signal from any source → s.noVLAN (rare; would mean no
+//     network, no FixedIP, no observed IP)
 func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, guestIDs map[string]struct{}, skipMACs map[string]struct{}) ([]Client, bootstrapSkipped) {
+	// Build the set of VLAN IDs assigned to guest networks so we can also
+	// reject by derived-VLAN, not just by network_id membership.
+	guestVLANs := map[int]struct{}{}
+	for _, n := range netByID {
+		if _, isGuest := guestIDs[n.ID]; isGuest && n.VLAN > 0 {
+			guestVLANs[n.VLAN] = struct{}{}
+		}
+	}
+
 	var out []Client
 	var s bootstrapSkipped
 	for _, u := range users {
@@ -371,55 +399,84 @@ func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, 
 		if err != nil {
 			continue
 		}
-		if _, isGuest := guestIDs[u.NetworkID]; isGuest {
-			s.total++
-			s.guest++
-			continue
-		}
 		if _, managed := skipMACs[mac]; managed {
 			s.total++
 			s.managed++
 			continue
 		}
-		net, ok := netByID[u.NetworkID]
-		if !ok || net.VLAN == 0 {
+		if _, isGuest := guestIDs[u.NetworkID]; isGuest {
 			s.total++
+			s.guest++
 			continue
 		}
+
+		vlanID := 0
+		if net, ok := netByID[u.NetworkID]; ok {
+			vlanID = net.VLAN
+		}
+		if vlanID == 0 {
+			if v, ok := vlanFromIP(u.FixedIP); ok {
+				vlanID = v
+			} else if v, ok := vlanFromIP(u.IP); ok {
+				vlanID = v
+			}
+		}
+		if vlanID == 0 {
+			s.total++
+			s.noVLAN++
+			continue
+		}
+		// After derivation, also reject if the derived VLAN matches a
+		// guest network's VLAN — covers stale clients whose network_id is
+		// null but whose last-seen IP is on the guest subnet.
+		if _, isGuest := guestVLANs[vlanID]; isGuest {
+			s.total++
+			s.guest++
+			continue
+		}
+
 		name := u.Name
 		if name == "" {
 			name = u.Hostname
 		}
 		ip := u.FixedIP
-		// Only set ip if it agrees with the network's VLAN third octet,
+		// Only set ip if it agrees with the derived VLAN's third octet,
 		// otherwise the YAML would fail loadClients validation. Let the
 		// human fill in a fixed IP later if they want one.
-		if ip != "" {
-			if !ipMatchesVLAN(ip, net.VLAN) {
-				ip = ""
-			}
+		if ip != "" && !ipMatchesVLAN(ip, vlanID) {
+			ip = ""
 		}
 		out = append(out, Client{
 			MAC:    mac,
 			Name:   name,
 			IP:     ip,
-			VLANID: net.VLAN,
+			VLANID: vlanID,
 		})
 	}
 	return out, s
 }
 
-func ipMatchesVLAN(ip string, vlan int) bool {
-	// Use the same check as loadClientFile's invariant, but as a boolean.
+// vlanFromIP extracts a VLAN ID from the third octet of a dotted-quad IPv4
+// address per the "third octet = VLAN" convention. Returns (0, false) for
+// anything unparseable or out of the [1, 4094] range.
+func vlanFromIP(ip string) (int, bool) {
 	parts := strings.Split(ip, ".")
 	if len(parts) != 4 {
-		return false
+		return 0, false
 	}
 	var third int
 	if _, err := fmt.Sscanf(parts[2], "%d", &third); err != nil {
-		return false
+		return 0, false
 	}
-	return third == vlan
+	if third < 1 || third > 4094 {
+		return 0, false
+	}
+	return third, true
+}
+
+func ipMatchesVLAN(ip string, vlan int) bool {
+	v, ok := vlanFromIP(ip)
+	return ok && v == vlan
 }
 
 func runPull(args []string) error {
