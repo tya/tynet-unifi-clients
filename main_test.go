@@ -1173,6 +1173,124 @@ func TestBootstrapCandidates_SkipManagedDirect(t *testing.T) {
 	}
 }
 
+func TestBootstrapCandidates_DeriveVLANFromFixedIP(t *testing.T) {
+	// network_id is null (legacy/stale client) but FixedIP exists.
+	// VLAN must be derived from the third octet of FixedIP.
+	netByID := map[string]*unifi.Network{
+		"net-70": {ID: "net-70", VLAN: 70},
+	}
+	users := []unifi.User{{
+		MAC:     "aa:bb:cc:dd:ee:ff",
+		Name:    "alice",
+		FixedIP: "10.0.70.42",
+	}}
+	got, s := bootstrapCandidates(users, netByID, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("want 1 candidate, got %d (skipped=%+v)", len(got), s)
+	}
+	if got[0].VLANID != 70 || got[0].IP != "10.0.70.42" {
+		t.Errorf("want vlan=70 ip=10.0.70.42, got vlan=%d ip=%q", got[0].VLANID, got[0].IP)
+	}
+}
+
+func TestBootstrapCandidates_DeriveVLANFromObservedIP(t *testing.T) {
+	// network_id is null and FixedIP is empty, but observed IP exists.
+	// VLAN derives from observed IP; Client.IP stays empty (no fixed
+	// reservation in inventory unless the user opts in).
+	users := []unifi.User{{
+		MAC:  "aa:bb:cc:dd:ee:ff",
+		Name: "alice",
+		IP:   "10.0.20.55",
+	}}
+	got, _ := bootstrapCandidates(users, map[string]*unifi.Network{}, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("want 1 candidate, got %d", len(got))
+	}
+	if got[0].VLANID != 20 || got[0].IP != "" {
+		t.Errorf("want vlan=20 ip='', got vlan=%d ip=%q", got[0].VLANID, got[0].IP)
+	}
+}
+
+func TestBootstrapCandidates_SkipGuestByDerivedVLAN(t *testing.T) {
+	// network_id is null but the last-seen IP is on the guest subnet.
+	// Skip as guest via the derived-VLAN check, even though the user
+	// is not associated to any guest network by ID.
+	netByID := map[string]*unifi.Network{
+		"net-guest": {ID: "net-guest", VLAN: 100, Purpose: "guest"},
+	}
+	guestIDs := map[string]struct{}{"net-guest": {}}
+	users := []unifi.User{{
+		MAC:  "aa:bb:cc:dd:ee:ff",
+		Name: "stale-phone",
+		IP:   "10.0.100.45", // last seen on guest VLAN
+	}}
+	got, s := bootstrapCandidates(users, netByID, guestIDs, nil)
+	if len(got) != 0 {
+		t.Errorf("want skip, got %v", got)
+	}
+	if s.guest != 1 {
+		t.Errorf("want s.guest=1, got %+v", s)
+	}
+}
+
+func TestBootstrapCandidates_NoVLANSignal(t *testing.T) {
+	// network_id null, FixedIP empty, observed IP empty → no signal.
+	// Skipped into the new noVLAN bucket.
+	users := []unifi.User{{MAC: "aa:bb:cc:dd:ee:ff", Name: "ghost"}}
+	got, s := bootstrapCandidates(users, map[string]*unifi.Network{}, nil, nil)
+	if len(got) != 0 {
+		t.Errorf("want skip, got %v", got)
+	}
+	if s.total != 1 || s.noVLAN != 1 {
+		t.Errorf("want total=1 noVLAN=1, got %+v", s)
+	}
+}
+
+func TestBootstrapCandidates_NetworkVLAN0FallsBackToIP(t *testing.T) {
+	// Network exists but has VLAN=0 (untagged main LAN). The third
+	// octet of FixedIP should win.
+	netByID := map[string]*unifi.Network{
+		"main": {ID: "main", VLAN: 0, IPSubnet: "10.0.10.1/24"},
+	}
+	users := []unifi.User{{
+		MAC:       "aa:bb:cc:dd:ee:ff",
+		Name:      "alice",
+		NetworkID: "main",
+		FixedIP:   "10.0.10.20",
+	}}
+	got, _ := bootstrapCandidates(users, netByID, nil, nil)
+	if len(got) != 1 || got[0].VLANID != 10 {
+		t.Errorf("want vlan=10 from FixedIP fallback, got %+v", got)
+	}
+}
+
+// --- vlanFromIP ---
+
+func TestVLANFromIP(t *testing.T) {
+	cases := []struct {
+		ip      string
+		want    int
+		wantOK  bool
+	}{
+		{"10.0.70.42", 70, true},
+		{"10.0.1.1", 1, true},
+		{"10.0.4094.1", 4094, true},
+		{"10.0.0.1", 0, false},    // third octet 0 → out of [1,4094]
+		{"10.0.4095.1", 0, false}, // out of range
+		{"not.an.ip.here", 0, false},
+		{"", 0, false},
+		{"10.0.70", 0, false}, // wrong arity
+	}
+	for _, tc := range cases {
+		t.Run(tc.ip, func(t *testing.T) {
+			got, ok := vlanFromIP(tc.ip)
+			if ok != tc.wantOK || got != tc.want {
+				t.Errorf("got (%d, %v), want (%d, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
 // --- ipMatchesVLAN ---
 
 func TestIPMatchesVLAN(t *testing.T) {
