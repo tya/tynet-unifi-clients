@@ -117,4 +117,5 @@ gh secret set APT_DISPATCH_TOKEN -R tya/tynet-unifi-clients
 - Sentinel errors at package scope (`errMissingArg`, etc.).
 - `var exit = os.Exit` test seam.
 - `run(args []string) error` separate from `main()`.
-- Tests use `httptest.NewTLSServer`.
+- Tests fake the UniFi API via a `var newUnifiClient = func(...)` seam +
+  a `fakeUnifiAPI` impl of the `unifiAPI` interface — no HTTP fixture.
