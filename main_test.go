@@ -1259,10 +1259,10 @@ func TestBootstrapCandidates_SkipBucketsRecordEntries(t *testing.T) {
 	guestIDs := map[string]struct{}{"net-guest": {}}
 	skipMACs := map[string]struct{}{"aa:bb:cc:dd:ee:01": {}}
 	users := []unifi.User{
-		{MAC: "aa:bb:cc:dd:ee:01", Name: "pi2", NetworkID: "net-70"},          // managed, named
+		{MAC: "aa:bb:cc:dd:ee:01", Name: "pi2", NetworkID: "net-70"},              // managed, named
 		{MAC: "aa:bb:cc:dd:ee:02", Hostname: "guestbook", NetworkID: "net-guest"}, // guest, hostname-only
-		{MAC: "aa:bb:cc:dd:ee:03"},                                            // noVLAN, unnamed
-		{MAC: "aa:bb:cc:dd:ee:04", Name: "alice", NetworkID: "net-70"},        // survives
+		{MAC: "aa:bb:cc:dd:ee:03"},                                     // noVLAN, unnamed
+		{MAC: "aa:bb:cc:dd:ee:04", Name: "alice", NetworkID: "net-70"}, // survives
 	}
 	got, s := bootstrapCandidates(users, netByID, guestIDs, skipMACs)
 	if len(got) != 1 || got[0].MAC != "aa:bb:cc:dd:ee:04" {
