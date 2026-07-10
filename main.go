@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/zoullx/unifi-go/unifi"
@@ -272,6 +273,7 @@ func runBootstrap(args []string) error {
 	write := fs.Bool("write", false, "actually write inventory/clients/<mac>.yml files (default: dry-run)")
 	hostVarsDir := fs.String("host-vars-dir", "", "tynet-infra inventory/host_vars/ (to skip SSH-managed MACs); empty disables the skip")
 	groupVarsAll := fs.String("group-vars-all", "", "tynet-infra inventory/group_vars/all.yml (for kickstart_mac); empty disables the skip")
+	verbose := fs.Bool("verbose", false, "list every skipped MAC by bucket (guest/managed/no-vlan-signal) on stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -330,6 +332,11 @@ func runBootstrap(args []string) error {
 
 	fmt.Fprintf(stderr, "controller has %d users; skipping %d (%d guest, %d host_vars-managed, %d no-vlan-signal)\n",
 		len(users), skipped.total, skipped.guest, skipped.managed, skipped.noVLAN)
+	if *verbose {
+		printSkippedMACs(stderr, "guest", skipped.guestMACs)
+		printSkippedMACs(stderr, "host_vars-managed", skipped.managedMACs)
+		printSkippedMACs(stderr, "no-vlan-signal", skipped.noVLANMACs)
+	}
 
 	if len(candidates) == 0 {
 		fmt.Fprintln(stdout, "no new clients to bootstrap")
@@ -356,7 +363,23 @@ func runBootstrap(args []string) error {
 	return nil
 }
 
-type bootstrapSkipped struct{ total, guest, managed, noVLAN int }
+type bootstrapSkipped struct {
+	total, guest, managed, noVLAN      int
+	guestMACs, managedMACs, noVLANMACs []string
+}
+
+// printSkippedMACs emits the MACs in one skip bucket to w, one per line,
+// prefixed with the bucket label so output stays grep-friendly. No-op when
+// the slice is empty.
+func printSkippedMACs(w io.Writer, label string, macs []string) {
+	if len(macs) == 0 {
+		return
+	}
+	sort.Strings(macs)
+	for _, m := range macs {
+		fmt.Fprintf(w, "  skip-%s %s\n", label, m)
+	}
+}
 
 // bootstrapCandidates turns the controller's raw user list into Client
 // records suitable for writing to inventory/clients/.
@@ -402,11 +425,13 @@ func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, 
 		if _, managed := skipMACs[mac]; managed {
 			s.total++
 			s.managed++
+			s.managedMACs = append(s.managedMACs, mac)
 			continue
 		}
 		if _, isGuest := guestIDs[u.NetworkID]; isGuest {
 			s.total++
 			s.guest++
+			s.guestMACs = append(s.guestMACs, mac)
 			continue
 		}
 
@@ -424,6 +449,7 @@ func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, 
 		if vlanID == 0 {
 			s.total++
 			s.noVLAN++
+			s.noVLANMACs = append(s.noVLANMACs, mac)
 			continue
 		}
 		// After derivation, also reject if the derived VLAN matches a
@@ -432,6 +458,7 @@ func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, 
 		if _, isGuest := guestVLANs[vlanID]; isGuest {
 			s.total++
 			s.guest++
+			s.guestMACs = append(s.guestMACs, mac)
 			continue
 		}
 
