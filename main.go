@@ -333,9 +333,9 @@ func runBootstrap(args []string) error {
 	fmt.Fprintf(stderr, "controller has %d users; skipping %d (%d guest, %d host_vars-managed, %d no-vlan-signal)\n",
 		len(users), skipped.total, skipped.guest, skipped.managed, skipped.noVLAN)
 	if *verbose {
-		printSkippedMACs(stderr, "guest", skipped.guestMACs)
-		printSkippedMACs(stderr, "host_vars-managed", skipped.managedMACs)
-		printSkippedMACs(stderr, "no-vlan-signal", skipped.noVLANMACs)
+		printSkipped(stderr, "guest", skipped.guestSkips)
+		printSkipped(stderr, "host_vars-managed", skipped.managedSkips)
+		printSkipped(stderr, "no-vlan-signal", skipped.noVLANSkips)
 	}
 
 	if len(candidates) == 0 {
@@ -363,21 +363,42 @@ func runBootstrap(args []string) error {
 	return nil
 }
 
+// skipEntry is one row rendered by `bootstrap --verbose`. Name is the same
+// value that would land in a candidate's Client.Name — u.Name, falling back
+// to u.Hostname, empty if neither is set (randomized-MAC ghosts often have
+// neither).
+type skipEntry struct{ MAC, Name string }
+
 type bootstrapSkipped struct {
-	total, guest, managed, noVLAN      int
-	guestMACs, managedMACs, noVLANMACs []string
+	total, guest, managed, noVLAN         int
+	guestSkips, managedSkips, noVLANSkips []skipEntry
 }
 
-// printSkippedMACs emits the MACs in one skip bucket to w, one per line,
-// prefixed with the bucket label so output stays grep-friendly. No-op when
-// the slice is empty.
-func printSkippedMACs(w io.Writer, label string, macs []string) {
-	if len(macs) == 0 {
+// nameFor returns the display name for a controller user — the same
+// name/hostname fallback the candidate path uses so verbose output stays
+// consistent with what apply would write.
+func nameFor(u unifi.User) string {
+	if u.Name != "" {
+		return u.Name
+	}
+	return u.Hostname
+}
+
+// printSkipped emits the entries in one skip bucket to w, one per line,
+// prefixed with the bucket label so output stays grep-friendly. Entries
+// with a known name get it appended after the MAC; unnamed entries render
+// bare. No-op when the slice is empty.
+func printSkipped(w io.Writer, label string, entries []skipEntry) {
+	if len(entries) == 0 {
 		return
 	}
-	sort.Strings(macs)
-	for _, m := range macs {
-		fmt.Fprintf(w, "  skip-%s %s\n", label, m)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].MAC < entries[j].MAC })
+	for _, e := range entries {
+		if e.Name != "" {
+			fmt.Fprintf(w, "  skip-%s %s  %s\n", label, e.MAC, e.Name)
+		} else {
+			fmt.Fprintf(w, "  skip-%s %s\n", label, e.MAC)
+		}
 	}
 }
 
@@ -425,13 +446,13 @@ func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, 
 		if _, managed := skipMACs[mac]; managed {
 			s.total++
 			s.managed++
-			s.managedMACs = append(s.managedMACs, mac)
+			s.managedSkips = append(s.managedSkips, skipEntry{mac, nameFor(u)})
 			continue
 		}
 		if _, isGuest := guestIDs[u.NetworkID]; isGuest {
 			s.total++
 			s.guest++
-			s.guestMACs = append(s.guestMACs, mac)
+			s.guestSkips = append(s.guestSkips, skipEntry{mac, nameFor(u)})
 			continue
 		}
 
@@ -449,7 +470,7 @@ func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, 
 		if vlanID == 0 {
 			s.total++
 			s.noVLAN++
-			s.noVLANMACs = append(s.noVLANMACs, mac)
+			s.noVLANSkips = append(s.noVLANSkips, skipEntry{mac, nameFor(u)})
 			continue
 		}
 		// After derivation, also reject if the derived VLAN matches a
@@ -458,14 +479,11 @@ func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, 
 		if _, isGuest := guestVLANs[vlanID]; isGuest {
 			s.total++
 			s.guest++
-			s.guestMACs = append(s.guestMACs, mac)
+			s.guestSkips = append(s.guestSkips, skipEntry{mac, nameFor(u)})
 			continue
 		}
 
-		name := u.Name
-		if name == "" {
-			name = u.Hostname
-		}
+		name := nameFor(u)
 		ip := u.FixedIP
 		// Only set ip if it agrees with the derived VLAN's third octet,
 		// otherwise the YAML would fail loadClients validation. Let the

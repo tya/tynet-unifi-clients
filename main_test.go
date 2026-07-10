@@ -1247,10 +1247,11 @@ func TestBootstrapCandidates_NoVLANSignal(t *testing.T) {
 	}
 }
 
-func TestBootstrapCandidates_SkipBucketsRecordMACs(t *testing.T) {
-	// Each skip arm should append the canonical MAC to its bucket slice so
-	// `bootstrap --verbose` can render them. One MAC per bucket, one
-	// candidate that survives — so we exercise every append site at once.
+func TestBootstrapCandidates_SkipBucketsRecordEntries(t *testing.T) {
+	// Each skip arm should record the canonical MAC and the display name
+	// (Name, falling back to Hostname) so `bootstrap --verbose` can render
+	// both. One entry per bucket + one survivor exercises every append
+	// site at once.
 	netByID := map[string]*unifi.Network{
 		"net-70":    {ID: "net-70", VLAN: 70},
 		"net-guest": {ID: "net-guest", VLAN: 99, Purpose: "guest"},
@@ -1258,35 +1259,36 @@ func TestBootstrapCandidates_SkipBucketsRecordMACs(t *testing.T) {
 	guestIDs := map[string]struct{}{"net-guest": {}}
 	skipMACs := map[string]struct{}{"aa:bb:cc:dd:ee:01": {}}
 	users := []unifi.User{
-		{MAC: "aa:bb:cc:dd:ee:01", NetworkID: "net-70"},   // managed
-		{MAC: "aa:bb:cc:dd:ee:02", NetworkID: "net-guest"}, // guest
-		{MAC: "aa:bb:cc:dd:ee:03", Name: "ghost"},          // noVLAN
-		{MAC: "aa:bb:cc:dd:ee:04", NetworkID: "net-70"},    // survives
+		{MAC: "aa:bb:cc:dd:ee:01", Name: "pi2", NetworkID: "net-70"},          // managed, named
+		{MAC: "aa:bb:cc:dd:ee:02", Hostname: "guestbook", NetworkID: "net-guest"}, // guest, hostname-only
+		{MAC: "aa:bb:cc:dd:ee:03"},                                            // noVLAN, unnamed
+		{MAC: "aa:bb:cc:dd:ee:04", Name: "alice", NetworkID: "net-70"},        // survives
 	}
 	got, s := bootstrapCandidates(users, netByID, guestIDs, skipMACs)
 	if len(got) != 1 || got[0].MAC != "aa:bb:cc:dd:ee:04" {
 		t.Fatalf("want 1 candidate (ee:04), got %+v", got)
 	}
-	if diff := cmp(s.managedMACs, []string{"aa:bb:cc:dd:ee:01"}); diff != "" {
-		t.Errorf("managedMACs %s", diff)
+	if diff := cmpSkips(s.managedSkips, []skipEntry{{"aa:bb:cc:dd:ee:01", "pi2"}}); diff != "" {
+		t.Errorf("managedSkips %s", diff)
 	}
-	if diff := cmp(s.guestMACs, []string{"aa:bb:cc:dd:ee:02"}); diff != "" {
-		t.Errorf("guestMACs %s", diff)
+	if diff := cmpSkips(s.guestSkips, []skipEntry{{"aa:bb:cc:dd:ee:02", "guestbook"}}); diff != "" {
+		t.Errorf("guestSkips %s", diff)
 	}
-	if diff := cmp(s.noVLANMACs, []string{"aa:bb:cc:dd:ee:03"}); diff != "" {
-		t.Errorf("noVLANMACs %s", diff)
+	if diff := cmpSkips(s.noVLANSkips, []skipEntry{{"aa:bb:cc:dd:ee:03", ""}}); diff != "" {
+		t.Errorf("noVLANSkips %s", diff)
 	}
 }
 
-// cmp is a one-shot equality check for []string — returns "" on match,
-// a "got X want Y" string otherwise. Local to keep the test self-contained.
-func cmp(got, want []string) string {
+// cmpSkips is a one-shot equality check for []skipEntry — returns "" on
+// match, a "got X want Y" string otherwise. Local to keep the test
+// self-contained.
+func cmpSkips(got, want []skipEntry) string {
 	if len(got) != len(want) {
 		return fmt.Sprintf("len mismatch: got %v want %v", got, want)
 	}
 	for i := range got {
 		if got[i] != want[i] {
-			return fmt.Sprintf("at %d: got %q want %q", i, got[i], want[i])
+			return fmt.Sprintf("at %d: got %+v want %+v", i, got[i], want[i])
 		}
 	}
 	return ""
