@@ -47,7 +47,7 @@ controller's actual `fixed_ip` (warn on drift).
 git clone git@github.com:tya/tynet-unifi-clients.git ~/src/tynet-unifi-clients
 cd ~/src/tynet-unifi-clients
 make build                                                       # → bin/tynet-unifi-clients
-UNIFI_API_KEY=$(op read "op://Private/radius-user-importer/password") \
+UNIFI_API_KEY=$(op read "op://Private/UNIFI_API_KEY/password") \
   ./bin/tynet-unifi-clients plan
 ```
 
