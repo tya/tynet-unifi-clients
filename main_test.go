@@ -20,6 +20,7 @@ type fakeUnifiAPI struct {
 	users       []unifi.User
 	created     []unifi.User
 	updated     []unifi.User
+	putBodies   []map[string]any // raw JSON of each Put call, for key-presence assertions
 	listNetErr  error
 	listUserErr error
 	createErr   error
@@ -62,12 +63,41 @@ func (f *fakeUnifiAPI) CreateUser(_ context.Context, _ string, d *unifi.User) (*
 	f.created = append(f.created, *d)
 	return d, nil
 }
-func (f *fakeUnifiAPI) UpdateUser(_ context.Context, _ string, d *unifi.User) (*unifi.User, error) {
+
+// Put backs updateUser's call for the Update apply path. Captures the raw
+// JSON body as a map (so tests can assert on key *presence*, not just
+// value -- the whole point of what updateUser fixes) in putBodies, round-
+// trips it through a unifi.User for the `.updated` assertions, then wraps
+// it the same way a real controller's {"data": [...]} response shape
+// would, decoded into whatever respBody updateUser passed.
+func (f *fakeUnifiAPI) Put(_ context.Context, _ string, reqBody interface{}, respBody interface{}) error {
 	if f.updateErr != nil {
-		return nil, f.updateErr
+		return f.updateErr
 	}
-	f.updated = append(f.updated, *d)
-	return d, nil
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	f.putBodies = append(f.putBodies, m)
+
+	var u unifi.User
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return err
+	}
+	f.updated = append(f.updated, u)
+
+	wrapper := struct {
+		Data []unifi.User `json:"data"`
+	}{Data: []unifi.User{u}}
+	raw2, err := json.Marshal(wrapper)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw2, respBody)
 }
 
 // testEnv bundles the captured per-test state. swapGlobals installs fakes and
@@ -641,6 +671,51 @@ func TestRunApply_UpdateHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(env.out.String(), "updated aa:bb:cc:dd:ee:ff") {
 		t.Errorf("missing 'updated' line, got %q", env.out.String())
+	}
+}
+
+func TestUpdateUser_ClearsFixedIPAndNoteExplicitly(t *testing.T) {
+	// Regression test for the bug fixed in this change: unifi.User tags
+	// FixedIP and Note `omitempty`, so marshaling a desired value of ""
+	// (a genuine clear -- e.g. inventory dropped a previously-applied
+	// ip: or notes:) would, through the SDK's typed UpdateUser, drop the
+	// key from the JSON body entirely. The controller's PUT merges by key
+	// *presence*, so an omitted key just leaves the stale value in place
+	// -- confirmed live against the real controller before this fix.
+	// updateUser must re-add both keys explicitly so the empty string
+	// actually reaches the controller.
+	fake := &fakeUnifiAPI{}
+	d := &unifi.User{
+		ID:      "u1",
+		MAC:     "aa:bb:cc:dd:ee:ff",
+		Name:    "alice",
+		FixedIP: "", // desired: cleared
+		Note:    "", // desired: cleared
+	}
+	if _, err := updateUser(context.Background(), fake, "default", d); err != nil {
+		t.Fatalf("updateUser: %v", err)
+	}
+	if len(fake.putBodies) != 1 {
+		t.Fatalf("want 1 Put call, got %d", len(fake.putBodies))
+	}
+	body := fake.putBodies[0]
+	if ip, ok := body["fixed_ip"]; !ok {
+		t.Error("fixed_ip key missing from PUT body -- clear would be silently dropped")
+	} else if ip != "" {
+		t.Errorf("want fixed_ip=\"\", got %v", ip)
+	}
+	if note, ok := body["note"]; !ok {
+		t.Error("note key missing from PUT body -- clear would be silently dropped")
+	} else if note != "" {
+		t.Errorf("want note=\"\", got %v", note)
+	}
+}
+
+func TestUpdateUser_PutErrorPropagates(t *testing.T) {
+	fake := &fakeUnifiAPI{updateErr: errors.New("controller hate")}
+	_, err := updateUser(context.Background(), fake, "default", &unifi.User{ID: "u1"})
+	if err == nil || !strings.Contains(err.Error(), "controller hate") {
+		t.Fatalf("want wrapped Put error, got %v", err)
 	}
 }
 

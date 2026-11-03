@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -19,13 +20,61 @@ type unifiAPI interface {
 	ListNetwork(ctx context.Context, site string) ([]unifi.Network, error)
 	ListUser(ctx context.Context, site string) ([]unifi.User, error)
 	CreateUser(ctx context.Context, site string, d *unifi.User) (*unifi.User, error)
-	UpdateUser(ctx context.Context, site string, d *unifi.User) (*unifi.User, error)
-	// Get is the SDK's generic REST escape hatch. Used directly (rather
-	// than a typed wrapper) by observedIP: /stat/user/<mac> carries a
-	// last_ip field that survives disconnection, but the SDK's typed
-	// unifi.User struct has no field for it, so going through e.g.
-	// GetUserByMAC silently drops it for any currently-offline client.
+	// Get and Put are the SDK's generic REST escape hatches. Used directly
+	// (rather than typed wrappers) in two places where the typed path
+	// silently drops data:
+	//  - Get, by observedIP: /stat/user/<mac> carries a last_ip field that
+	//    survives disconnection, but the SDK's typed unifi.User struct has
+	//    no field for it, so going through e.g. GetUserByMAC silently
+	//    drops it for any currently-offline client.
+	//  - Put, by updateUser: User.FixedIP and User.Note are both tagged
+	//    `omitempty`, so unifi.Client's typed UpdateUser can never send an
+	//    explicit empty string to *clear* either field -- json.Marshal
+	//    drops the key entirely, and the controller's PUT handler merges
+	//    by JSON key presence, so an omitted key just leaves the existing
+	//    value in place. See updateUser's comment for how this was found.
 	Get(ctx context.Context, apiPath string, reqBody, respBody interface{}) error
+	Put(ctx context.Context, apiPath string, reqBody, respBody interface{}) error
+}
+
+// updateUser pushes d (an Update step's desired state, with d.ID already
+// set to the existing controller record's ID) to /rest/user/<id> via the
+// generic Put rather than unifi.Client's typed UpdateUser. Needed because
+// FixedIP and Note are both tagged `omitempty` on the SDK's User struct, so
+// a *desired* empty value for either -- exactly what diffUser produces when
+// inventory drops a previously-applied ip: or notes: -- never makes it into
+// the request body; the controller just leaves the stale value in place.
+// Confirmed live against the real controller: a reported-successful apply
+// left a stale fixed_ip untouched, while every non-empty-string / bool
+// field in the same Update landed correctly.
+//
+// Re-adding fixed_ip/note to the marshaled body (even when empty) is both
+// necessary and sufficient to make a clear stick: the controller's PUT
+// merges by JSON key presence rather than replacing the whole record --
+// confirmed by the fact that fields this reconciler never sets at all
+// (hostname, last_seen, ...) survive a real Update untouched.
+func updateUser(ctx context.Context, api unifiAPI, site string, d *unifi.User) (*unifi.User, error) {
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	body["fixed_ip"] = d.FixedIP
+	body["note"] = d.Note
+
+	var resp struct {
+		Data []unifi.User `json:"data"`
+	}
+	if err := api.Put(ctx, fmt.Sprintf("s/%s/rest/user/%s", site, d.ID), body, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Data) != 1 {
+		return nil, fmt.Errorf("update user %s: unexpected response shape", d.MAC)
+	}
+	return &resp.Data[0], nil
 }
 
 // observedIP returns the best available current-or-last-known IP for mac

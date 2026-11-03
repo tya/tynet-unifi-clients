@@ -257,7 +257,7 @@ func runApply(args []string) error {
 		case Update:
 			d := s.Desired
 			d.ID = s.Existing.ID
-			if _, err := api.UpdateUser(ctx, unifiSite, &d); err != nil {
+			if _, err := updateUser(ctx, api, unifiSite, &d); err != nil {
 				return fmt.Errorf("update %s: %w", s.MAC, err)
 			}
 			fmt.Fprintf(stdout, "  updated %s\n", s.MAC)
