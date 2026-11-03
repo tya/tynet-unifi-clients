@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +24,29 @@ type fakeUnifiAPI struct {
 	listUserErr error
 	createErr   error
 	updateErr   error
+
+	// getRespByPath backs Get, keyed by the exact apiPath observedIP builds
+	// ("s/<site>/stat/user/<mac>"). Unset entries return errNotFoundFake,
+	// matching "no live IP available" -- the same outcome as a real 404 or
+	// an empty data array.
+	getRespByPath map[string]string // apiPath -> raw JSON to unmarshal into respBody
+}
+
+var errNotFoundFake = errors.New("fake: not found")
+
+func (f *fakeUnifiAPI) Get(_ context.Context, apiPath string, _ interface{}, respBody interface{}) error {
+	raw, ok := f.getRespByPath[apiPath]
+	if !ok {
+		return errNotFoundFake
+	}
+	return json.Unmarshal([]byte(raw), respBody)
+}
+
+// statUserResp builds the raw JSON a real /stat/user/<mac> call returns,
+// for use with fakeUnifiAPI.getRespByPath. Mirrors the shape observedIP
+// parses: {"data": [{"ip": ..., "last_ip": ...}]}.
+func statUserResp(ip, lastIP string) string {
+	return fmt.Sprintf(`{"data":[{"ip":%q,"last_ip":%q}]}`, ip, lastIP)
 }
 
 func (f *fakeUnifiAPI) ListNetwork(_ context.Context, _ string) ([]unifi.Network, error) {
@@ -1100,10 +1124,11 @@ func TestBootstrapCandidates_IPVLANMismatchDropped(t *testing.T) {
 		"net-70": {ID: "net-70", VLAN: 70},
 	}
 	users := []unifi.User{{
-		MAC:       "aa:bb:cc:dd:ee:ff",
-		Name:      "alice",
-		FixedIP:   "10.0.60.42", // third octet 60 ≠ vlan 70
-		NetworkID: "net-70",
+		MAC:        "aa:bb:cc:dd:ee:ff",
+		Name:       "alice",
+		FixedIP:    "10.0.60.42", // third octet 60 ≠ vlan 70
+		UseFixedIP: true,
+		NetworkID:  "net-70",
 	}}
 	got, _ := bootstrapCandidates(users, netByID, nil, nil)
 	if len(got) != 1 || got[0].IP != "" {
@@ -1175,15 +1200,16 @@ func TestBootstrapCandidates_SkipManagedDirect(t *testing.T) {
 }
 
 func TestBootstrapCandidates_DeriveVLANFromFixedIP(t *testing.T) {
-	// network_id is null (legacy/stale client) but FixedIP exists.
-	// VLAN must be derived from the third octet of FixedIP.
+	// network_id is null (legacy/stale client) but an *active* FixedIP
+	// reservation exists. VLAN must be derived from its third octet.
 	netByID := map[string]*unifi.Network{
 		"net-70": {ID: "net-70", VLAN: 70},
 	}
 	users := []unifi.User{{
-		MAC:     "aa:bb:cc:dd:ee:ff",
-		Name:    "alice",
-		FixedIP: "10.0.70.42",
+		MAC:        "aa:bb:cc:dd:ee:ff",
+		Name:       "alice",
+		FixedIP:    "10.0.70.42",
+		UseFixedIP: true,
 	}}
 	got, s := bootstrapCandidates(users, netByID, nil, nil)
 	if len(got) != 1 {
@@ -1191,6 +1217,85 @@ func TestBootstrapCandidates_DeriveVLANFromFixedIP(t *testing.T) {
 	}
 	if got[0].VLANID != 70 || got[0].IP != "10.0.70.42" {
 		t.Errorf("want vlan=70 ip=10.0.70.42, got vlan=%d ip=%q", got[0].VLANID, got[0].IP)
+	}
+}
+
+func TestBootstrapCandidates_InactiveFixedIPIgnoredForVLANAndIP(t *testing.T) {
+	// network_id is null and FixedIP is set but UseFixedIP is false: a
+	// stale DHCP-reservation value UniFi left behind after the client's
+	// real network changed (e.g. a device that predates a VLAN split).
+	// It must not be trusted for VLAN derivation or emitted as ip: --
+	// the live observed IP is the real signal.
+	users := []unifi.User{{
+		MAC:        "aa:bb:cc:dd:ee:ff",
+		Name:       "master-tv",
+		FixedIP:    "10.0.1.114", // stale, pre-dates the media VLAN
+		UseFixedIP: false,
+		IP:         "10.0.70.114", // live, accurate
+	}}
+	got, s := bootstrapCandidates(users, map[string]*unifi.Network{}, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("want 1 candidate, got %d (skipped=%+v)", len(got), s)
+	}
+	if got[0].VLANID != 70 || got[0].IP != "" {
+		t.Errorf("want vlan=70 (from observed IP) ip='' (inactive FixedIP dropped), got vlan=%d ip=%q",
+			got[0].VLANID, got[0].IP)
+	}
+}
+
+func TestEnrichObservedIPs_FillsMissingIPFromLiveIP(t *testing.T) {
+	// ListUser's bulk response left IP empty (the common case on a real
+	// controller); /stat/user/<mac> has a live "ip". enrichObservedIPs
+	// should backfill it.
+	mac := "aa:bb:cc:dd:ee:ff"
+	api := &fakeUnifiAPI{getRespByPath: map[string]string{
+		fmt.Sprintf("s/%s/stat/user/%s", unifiSite, mac): statUserResp("10.0.70.114", ""),
+	}}
+	users := []unifi.User{{MAC: mac}}
+	enrichObservedIPs(context.Background(), api, users)
+	if users[0].IP != "10.0.70.114" {
+		t.Errorf("want IP backfilled to 10.0.70.114, got %q", users[0].IP)
+	}
+}
+
+func TestEnrichObservedIPs_FillsMissingIPFromLastIP(t *testing.T) {
+	// A currently-offline client: no live "ip", but "last_ip" survives
+	// disconnection. This is exactly the case that bit master-tv et al --
+	// GetUserByMAC's typed unifi.User has no field for last_ip at all.
+	mac := "aa:bb:cc:dd:ee:ff"
+	api := &fakeUnifiAPI{getRespByPath: map[string]string{
+		fmt.Sprintf("s/%s/stat/user/%s", unifiSite, mac): statUserResp("", "10.0.70.114"),
+	}}
+	users := []unifi.User{{MAC: mac}}
+	enrichObservedIPs(context.Background(), api, users)
+	if users[0].IP != "10.0.70.114" {
+		t.Errorf("want IP backfilled from last_ip to 10.0.70.114, got %q", users[0].IP)
+	}
+}
+
+func TestEnrichObservedIPs_LeavesExistingIPAlone(t *testing.T) {
+	// Already has an IP from ListUser -- must not call out to (or be
+	// overwritten by) the live lookup.
+	mac := "aa:bb:cc:dd:ee:ff"
+	api := &fakeUnifiAPI{getRespByPath: map[string]string{
+		fmt.Sprintf("s/%s/stat/user/%s", unifiSite, mac): statUserResp("10.0.1.999", ""),
+	}}
+	users := []unifi.User{{MAC: mac, IP: "10.0.70.114"}}
+	enrichObservedIPs(context.Background(), api, users)
+	if users[0].IP != "10.0.70.114" {
+		t.Errorf("want existing IP left untouched, got %q", users[0].IP)
+	}
+}
+
+func TestEnrichObservedIPs_LookupFailureLeavesIPEmpty(t *testing.T) {
+	// No getRespByPath entry => fakeUnifiAPI.Get returns an error. Must be
+	// a silent no-op, same as "no live IP available" -- not a fatal error
+	// for the whole bootstrap run.
+	api := &fakeUnifiAPI{getRespByPath: nil}
+	users := []unifi.User{{MAC: "aa:bb:cc:dd:ee:ff"}}
+	enrichObservedIPs(context.Background(), api, users)
+	if users[0].IP != "" {
+		t.Errorf("want IP to stay empty on lookup failure, got %q", users[0].IP)
 	}
 }
 
@@ -1301,10 +1406,11 @@ func TestBootstrapCandidates_NetworkVLAN0FallsBackToIP(t *testing.T) {
 		"main": {ID: "main", VLAN: 0, IPSubnet: "10.0.10.1/24"},
 	}
 	users := []unifi.User{{
-		MAC:       "aa:bb:cc:dd:ee:ff",
-		Name:      "alice",
-		NetworkID: "main",
-		FixedIP:   "10.0.10.20",
+		MAC:        "aa:bb:cc:dd:ee:ff",
+		Name:       "alice",
+		NetworkID:  "main",
+		FixedIP:    "10.0.10.20",
+		UseFixedIP: true,
 	}}
 	got, _ := bootstrapCandidates(users, netByID, nil, nil)
 	if len(got) != 1 || got[0].VLANID != 10 {
