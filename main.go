@@ -296,6 +296,7 @@ func runBootstrap(args []string) error {
 	if err != nil {
 		return fmt.Errorf("list users: %w", err)
 	}
+	enrichObservedIPs(ctx, api, users)
 
 	guestIDs := guestNetworkIDs(networks)
 	netByID := map[string]*unifi.Network{}
@@ -402,12 +403,36 @@ func printSkipped(w io.Writer, label string, entries []skipEntry) {
 	}
 }
 
+// enrichObservedIPs fills in User.IP for entries where ListUser's bulk
+// /rest/user response left it empty. On a real controller that's most
+// clients. Without this, bootstrapCandidates' observed-IP fallback has
+// nothing to fall back to for the vast majority of already-migrated,
+// currently-offline devices (a TV or game console is usually off).
+//
+// Best-effort and silent on a per-MAC failure: that user's IP just stays
+// empty, same as if we hadn't tried, and bootstrapCandidates' existing
+// no-vlan-signal bucket handles it.
+func enrichObservedIPs(ctx context.Context, api unifiAPI, users []unifi.User) {
+	for i := range users {
+		if users[i].IP != "" {
+			continue
+		}
+		if ip := observedIP(ctx, api, unifiSite, users[i].MAC); ip != "" {
+			users[i].IP = ip
+		}
+	}
+}
+
 // bootstrapCandidates turns the controller's raw user list into Client
 // records suitable for writing to inventory/clients/.
 //
 // VLAN derivation, in order:
 //  1. Network.VLAN from the user's network_id (when both are set and VLAN > 0)
-//  2. third octet of FixedIP (per "third octet = VLAN" convention)
+//  2. third octet of FixedIP, but only when UseFixedIP is true (per "third
+//     octet = VLAN" convention) — an inactive FixedIP is stale metadata, not
+//     a signal; UniFi keeps old DHCP-reservation values around after a
+//     client's actual network changes, and UseFixedIP=false is how it marks
+//     them dead
 //  3. third octet of observed IP
 //
 // Why the fallback exists: UniFi accumulates stale client records whose
@@ -461,10 +486,15 @@ func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, 
 			vlanID = net.VLAN
 		}
 		if vlanID == 0 {
-			if v, ok := vlanFromIP(u.FixedIP); ok {
-				vlanID = v
-			} else if v, ok := vlanFromIP(u.IP); ok {
-				vlanID = v
+			if u.UseFixedIP {
+				if v, ok := vlanFromIP(u.FixedIP); ok {
+					vlanID = v
+				}
+			}
+			if vlanID == 0 {
+				if v, ok := vlanFromIP(u.IP); ok {
+					vlanID = v
+				}
 			}
 		}
 		if vlanID == 0 {
@@ -484,7 +514,10 @@ func bootstrapCandidates(users []unifi.User, netByID map[string]*unifi.Network, 
 		}
 
 		name := nameFor(u)
-		ip := u.FixedIP
+		var ip string
+		if u.UseFixedIP {
+			ip = u.FixedIP
+		}
 		// Only set ip if it agrees with the derived VLAN's third octet,
 		// otherwise the YAML would fail loadClients validation. Let the
 		// human fill in a fixed IP later if they want one.

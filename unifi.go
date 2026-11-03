@@ -20,6 +20,37 @@ type unifiAPI interface {
 	ListUser(ctx context.Context, site string) ([]unifi.User, error)
 	CreateUser(ctx context.Context, site string, d *unifi.User) (*unifi.User, error)
 	UpdateUser(ctx context.Context, site string, d *unifi.User) (*unifi.User, error)
+	// Get is the SDK's generic REST escape hatch. Used directly (rather
+	// than a typed wrapper) by observedIP: /stat/user/<mac> carries a
+	// last_ip field that survives disconnection, but the SDK's typed
+	// unifi.User struct has no field for it, so going through e.g.
+	// GetUserByMAC silently drops it for any currently-offline client.
+	Get(ctx context.Context, apiPath string, reqBody, respBody interface{}) error
+}
+
+// observedIP returns the best available current-or-last-known IP for mac
+// from /stat/user/<mac>: "ip" when the client is online/recently cached,
+// falling back to "last_ip" (which UniFi keeps long after disconnection) --
+// neither of which the SDK's typed User struct exposes. Returns "" on any
+// lookup failure (unknown MAC, never-seen client, transient error); callers
+// treat that the same as "no signal available".
+func observedIP(ctx context.Context, api unifiAPI, site, mac string) string {
+	var resp struct {
+		Data []struct {
+			IP     string `json:"ip"`
+			LastIP string `json:"last_ip"`
+		} `json:"data"`
+	}
+	if err := api.Get(ctx, fmt.Sprintf("s/%s/stat/user/%s", site, mac), nil, &resp); err != nil {
+		return ""
+	}
+	if len(resp.Data) == 0 {
+		return ""
+	}
+	if resp.Data[0].IP != "" {
+		return resp.Data[0].IP
+	}
+	return resp.Data[0].LastIP
 }
 
 // newUnifiClient constructs the upstream zoullx client. APIKey auth only;
