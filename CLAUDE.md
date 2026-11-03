@@ -26,8 +26,6 @@ Four subcommands, all sharing the same fetch-and-reconcile prelude:
 make test          # go test -race ./...
 make test-cover    # writes coverage.out + coverage.html
 make build         # → bin/tynet-unifi-clients (host arch)
-make build-linux   # → ./tynet-unifi-clients   (linux/arm64, for the Pi)
-make deb           # → dist/*.deb              (needs nfpm in PATH)
 make lint          # go vet + go fmt
 ```
 
@@ -104,27 +102,10 @@ MAC, but on associate the AP only enforces it for **PPSK / WPA-Enterprise
 until PPSK/RADIUS lands. This is documented in the README and is the reason
 the tool surfaces `Connection: wired | wireless | ""` but doesn't gate on it.
 
-## Release flow (in case you touch it)
+## Release flow
 
-Tag-driven. `Makefile` derives the Debian version from `git describe
---tags --dirty` with `-` → `~` to keep it a valid Debian version.
-`.github/workflows/release.yml` fires on `v*` tags:
-
-1. Cross-compile linux/arm64.
-2. `nfpm package` using `packaging/nfpm.yaml` → `dist/*.deb`.
-3. Publish a GitHub Release with the deb attached.
-4. Dispatch a `new-release` repo-event to `tya/tynet-apt`, which regenerates
-   `Packages.gz`, signs `Release`/`InRelease` (GPG `47AA8444945F450A`), and
-   commits to `gh-pages`. Pages serves it within a couple of minutes.
-
-`APT_DISPATCH_TOKEN` is the required secret — a PAT with `repo` scope on
-`tya/tynet-apt`, the same one other `tynet-*` repos use to dispatch ingest
-events.
-
-For an off-cycle Pi test build:
-
-```
-make deb VERSION=0.1.0-dev
-scp dist/tynet-unifi-clients_0.1.0-dev_arm64.deb pi3.tynet.us:/tmp/
-ssh pi3.tynet.us "sudo dpkg -i /tmp/tynet-unifi-clients_*.deb"
-```
+None. Runs only from the Mac — the Debian packaging + release workflow
+(`make deb`/`build-linux`, `.github/workflows/release.yml`, `packaging/`,
+the `tya/tynet-apt` dispatch) was deliberately dropped; see `25ec5a9`. CI
+(`.github/workflows/ci.yml`) just runs `go vet` + `gofmt -l` + `go test -race`
+on push/PR to `main`.
