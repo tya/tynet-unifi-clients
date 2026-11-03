@@ -81,6 +81,42 @@ func TestBuild_Update(t *testing.T) {
 	}
 }
 
+func TestBuild_UpdateClearsRemovedFixedIPAndNote(t *testing.T) {
+	// ip: and notes: were removed from the inventory file, but the
+	// controller still holds the values from a previous apply. The
+	// reconciler must flag this as drift so apply can retract them --
+	// not treat an empty desired field as "don't care".
+	desired := []Client{
+		{MAC: "aa:bb:cc:dd:ee:ff", Name: "alice", VLANID: 70},
+	}
+	actual := []unifi.User{{
+		ID:                            "u1",
+		MAC:                           "aa:bb:cc:dd:ee:ff",
+		Name:                          "alice",
+		NetworkID:                     "net-70",
+		FixedIP:                       "10.0.70.42",
+		UseFixedIP:                    true,
+		Note:                          "an old note",
+		VirtualNetworkOverrideEnabled: true,
+		VirtualNetworkOverrideID:      "net-70",
+	}}
+	plan := Build(desired, actual, testNetworks)
+	s := plan.Steps[0]
+	if s.Action != Update {
+		t.Fatalf("want Update (fixed_ip/note must be cleared), got %s; reasons=%v", s.Action, s.Reasons)
+	}
+	joined := strings.Join(s.Reasons, "; ")
+	if !strings.Contains(joined, "fixed_ip") || !strings.Contains(joined, "use_fixedip") {
+		t.Errorf("want fixed_ip and use_fixedip in reasons, got %v", s.Reasons)
+	}
+	if !strings.Contains(joined, "note") {
+		t.Errorf("want note in reasons, got %v", s.Reasons)
+	}
+	if s.Desired.UseFixedIP || s.Desired.FixedIP != "" {
+		t.Errorf("desired should clear fixed IP, got %+v", s.Desired)
+	}
+}
+
 func TestBuild_SkipGuest(t *testing.T) {
 	desired := []Client{
 		{MAC: "aa:bb:cc:dd:ee:ff", Name: "burner-phone", IP: "10.0.99.42", VLANID: 99},

@@ -200,15 +200,13 @@ func diffUser(cur, desired *unifi.User) []string {
 		out = append(out, fmt.Sprintf("virtual_network_override_id: %q → %q",
 			cur.VirtualNetworkOverrideID, desired.VirtualNetworkOverrideID))
 	}
-	if desired.UseFixedIP {
-		if cur.FixedIP != desired.FixedIP {
-			out = append(out, fmt.Sprintf("fixed_ip: %q → %q", cur.FixedIP, desired.FixedIP))
-		}
-		if cur.UseFixedIP != desired.UseFixedIP {
-			out = append(out, fmt.Sprintf("use_fixedip: %t → %t", cur.UseFixedIP, desired.UseFixedIP))
-		}
+	if cur.FixedIP != desired.FixedIP {
+		out = append(out, fmt.Sprintf("fixed_ip: %q → %q", cur.FixedIP, desired.FixedIP))
 	}
-	if desired.Note != "" && cur.Note != desired.Note {
+	if cur.UseFixedIP != desired.UseFixedIP {
+		out = append(out, fmt.Sprintf("use_fixedip: %t → %t", cur.UseFixedIP, desired.UseFixedIP))
+	}
+	if cur.Note != desired.Note {
 		out = append(out, fmt.Sprintf("note: %q → %q", cur.Note, desired.Note))
 	}
 	return out
