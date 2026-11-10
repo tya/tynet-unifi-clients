@@ -164,6 +164,32 @@ func TestBuild_FixedIPDriftWarning(t *testing.T) {
 	}
 }
 
+func TestBuild_NoFixedIPDriftWarningWhenInactive(t *testing.T) {
+	// A controller fixed_ip that's inactive (UseFixedIP: false) is stale
+	// metadata, not a live conflict -- per bootstrapCandidates' own
+	// derivation rules, this is exactly the state UniFi leaves a dead
+	// reservation in. The drift warning must not fire for it, even though
+	// the stale value differs from inventory's ip:.
+	desired := []Client{
+		{MAC: "aa:bb:cc:dd:ee:ff", Name: "alice", IP: "10.0.70.42", VLANID: 70},
+	}
+	actual := []unifi.User{{
+		ID:                            "u1",
+		MAC:                           "aa:bb:cc:dd:ee:ff",
+		Name:                          "alice",
+		NetworkID:                     "net-70",
+		FixedIP:                       "10.0.1.99", // stale, from before a VLAN move
+		UseFixedIP:                    false,
+		VirtualNetworkOverrideEnabled: true,
+		VirtualNetworkOverrideID:      "net-70",
+	}}
+	plan := Build(desired, actual, testNetworks)
+	s := plan.Steps[0]
+	if len(s.Warnings) != 0 {
+		t.Errorf("want no fixed_ip drift warning for an inactive controller fixed_ip, got %v", s.Warnings)
+	}
+}
+
 func TestBuild_MACNormalizationOnExisting(t *testing.T) {
 	// Controller may return MAC in any case; our matcher normalizes.
 	desired := []Client{

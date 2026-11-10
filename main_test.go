@@ -31,11 +31,13 @@ type fakeUnifiAPI struct {
 	// matching "no live IP available" -- the same outcome as a real 404 or
 	// an empty data array.
 	getRespByPath map[string]string // apiPath -> raw JSON to unmarshal into respBody
+	getCalls      []string          // every apiPath Get was actually invoked with, for "was this skipped" assertions
 }
 
 var errNotFoundFake = errors.New("fake: not found")
 
 func (f *fakeUnifiAPI) Get(_ context.Context, apiPath string, _ interface{}, respBody interface{}) error {
+	f.getCalls = append(f.getCalls, apiPath)
 	raw, ok := f.getRespByPath[apiPath]
 	if !ok {
 		return errNotFoundFake
@@ -674,21 +676,21 @@ func TestRunApply_UpdateHappyPath(t *testing.T) {
 	}
 }
 
-func TestUpdateUser_ClearsFixedIPAndNoteExplicitly(t *testing.T) {
-	// Regression test for the bug fixed in this change: unifi.User tags
-	// FixedIP and Note `omitempty`, so marshaling a desired value of ""
-	// (a genuine clear -- e.g. inventory dropped a previously-applied
-	// ip: or notes:) would, through the SDK's typed UpdateUser, drop the
-	// key from the JSON body entirely. The controller's PUT merges by key
-	// *presence*, so an omitted key just leaves the stale value in place
-	// -- confirmed live against the real controller before this fix.
-	// updateUser must re-add both keys explicitly so the empty string
-	// actually reaches the controller.
+func TestUpdateUser_ClearsNameFixedIPAndNoteExplicitly(t *testing.T) {
+	// Regression test: unifi.User tags Name, FixedIP, and Note all
+	// `omitempty`, so marshaling a desired value of "" for any of them
+	// (a genuine clear -- e.g. inventory dropped a name:, a previously-
+	// applied ip:, or notes:) would, through the SDK's typed UpdateUser,
+	// drop that key from the JSON body entirely. The controller's PUT
+	// merges by key *presence*, so an omitted key just leaves the stale
+	// value in place -- confirmed live against the real controller for
+	// fixed_ip before this fix. updateUser must re-add all three keys
+	// explicitly so the empty string actually reaches the controller.
 	fake := &fakeUnifiAPI{}
 	d := &unifi.User{
 		ID:      "u1",
 		MAC:     "aa:bb:cc:dd:ee:ff",
-		Name:    "alice",
+		Name:    "", // desired: cleared
 		FixedIP: "", // desired: cleared
 		Note:    "", // desired: cleared
 	}
@@ -699,15 +701,13 @@ func TestUpdateUser_ClearsFixedIPAndNoteExplicitly(t *testing.T) {
 		t.Fatalf("want 1 Put call, got %d", len(fake.putBodies))
 	}
 	body := fake.putBodies[0]
-	if ip, ok := body["fixed_ip"]; !ok {
-		t.Error("fixed_ip key missing from PUT body -- clear would be silently dropped")
-	} else if ip != "" {
-		t.Errorf("want fixed_ip=\"\", got %v", ip)
-	}
-	if note, ok := body["note"]; !ok {
-		t.Error("note key missing from PUT body -- clear would be silently dropped")
-	} else if note != "" {
-		t.Errorf("want note=\"\", got %v", note)
+	for _, field := range []string{"name", "fixed_ip", "note"} {
+		v, ok := body[field]
+		if !ok {
+			t.Errorf("%s key missing from PUT body -- clear would be silently dropped", field)
+		} else if v != "" {
+			t.Errorf("want %s=\"\", got %v", field, v)
+		}
 	}
 }
 
@@ -1327,7 +1327,7 @@ func TestEnrichObservedIPs_FillsMissingIPFromLiveIP(t *testing.T) {
 		fmt.Sprintf("s/%s/stat/user/%s", unifiSite, mac): statUserResp("10.0.70.114", ""),
 	}}
 	users := []unifi.User{{MAC: mac}}
-	enrichObservedIPs(context.Background(), api, users)
+	enrichObservedIPs(context.Background(), api, users, nil, nil)
 	if users[0].IP != "10.0.70.114" {
 		t.Errorf("want IP backfilled to 10.0.70.114, got %q", users[0].IP)
 	}
@@ -1342,7 +1342,7 @@ func TestEnrichObservedIPs_FillsMissingIPFromLastIP(t *testing.T) {
 		fmt.Sprintf("s/%s/stat/user/%s", unifiSite, mac): statUserResp("", "10.0.70.114"),
 	}}
 	users := []unifi.User{{MAC: mac}}
-	enrichObservedIPs(context.Background(), api, users)
+	enrichObservedIPs(context.Background(), api, users, nil, nil)
 	if users[0].IP != "10.0.70.114" {
 		t.Errorf("want IP backfilled from last_ip to 10.0.70.114, got %q", users[0].IP)
 	}
@@ -1356,9 +1356,41 @@ func TestEnrichObservedIPs_LeavesExistingIPAlone(t *testing.T) {
 		fmt.Sprintf("s/%s/stat/user/%s", unifiSite, mac): statUserResp("10.0.1.999", ""),
 	}}
 	users := []unifi.User{{MAC: mac, IP: "10.0.70.114"}}
-	enrichObservedIPs(context.Background(), api, users)
+	enrichObservedIPs(context.Background(), api, users, nil, nil)
 	if users[0].IP != "10.0.70.114" {
 		t.Errorf("want existing IP left untouched, got %q", users[0].IP)
+	}
+}
+
+func TestEnrichObservedIPs_SkipsGuestNetworkWithoutLiveCall(t *testing.T) {
+	// A guest-network client is discarded unconditionally by
+	// bootstrapCandidates regardless of its IP, so enriching it first would
+	// be a wasted /stat/user/<mac> round-trip. Assert Get is never even
+	// called for it.
+	api := &fakeUnifiAPI{}
+	users := []unifi.User{{MAC: "aa:bb:cc:dd:ee:ff", NetworkID: "net-guest"}}
+	guestIDs := map[string]struct{}{"net-guest": {}}
+	enrichObservedIPs(context.Background(), api, users, guestIDs, nil)
+	if len(api.getCalls) != 0 {
+		t.Errorf("want no live calls for a guest-network client, got %v", api.getCalls)
+	}
+	if users[0].IP != "" {
+		t.Errorf("want IP to stay empty, got %q", users[0].IP)
+	}
+}
+
+func TestEnrichObservedIPs_SkipsManagedMACWithoutLiveCall(t *testing.T) {
+	// A host_vars-managed MAC (e.g. a Pi owned by unifi-reservations.yml) is
+	// likewise discarded unconditionally by bootstrapCandidates.
+	api := &fakeUnifiAPI{}
+	users := []unifi.User{{MAC: "aa:bb:cc:dd:ee:ff"}}
+	skipMACs := map[string]struct{}{"aa:bb:cc:dd:ee:ff": {}}
+	enrichObservedIPs(context.Background(), api, users, nil, skipMACs)
+	if len(api.getCalls) != 0 {
+		t.Errorf("want no live calls for a host_vars-managed client, got %v", api.getCalls)
+	}
+	if users[0].IP != "" {
+		t.Errorf("want IP to stay empty, got %q", users[0].IP)
 	}
 }
 
@@ -1368,7 +1400,7 @@ func TestEnrichObservedIPs_LookupFailureLeavesIPEmpty(t *testing.T) {
 	// for the whole bootstrap run.
 	api := &fakeUnifiAPI{getRespByPath: nil}
 	users := []unifi.User{{MAC: "aa:bb:cc:dd:ee:ff"}}
-	enrichObservedIPs(context.Background(), api, users)
+	enrichObservedIPs(context.Background(), api, users, nil, nil)
 	if users[0].IP != "" {
 		t.Errorf("want IP to stay empty on lookup failure, got %q", users[0].IP)
 	}

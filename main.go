@@ -296,8 +296,6 @@ func runBootstrap(args []string) error {
 	if err != nil {
 		return fmt.Errorf("list users: %w", err)
 	}
-	enrichObservedIPs(ctx, api, users)
-
 	guestIDs := guestNetworkIDs(networks)
 	netByID := map[string]*unifi.Network{}
 	for i := range networks {
@@ -311,6 +309,8 @@ func runBootstrap(args []string) error {
 			return fmt.Errorf("load host_vars MACs: %w", err)
 		}
 	}
+
+	enrichObservedIPs(ctx, api, users, guestIDs, skipMACs)
 
 	dir, err := c.resolveInventoryPath()
 	if err != nil && !*write {
@@ -409,12 +409,25 @@ func printSkipped(w io.Writer, label string, entries []skipEntry) {
 // nothing to fall back to for the vast majority of already-migrated,
 // currently-offline devices (a TV or game console is usually off).
 //
+// Skips guest-network and host_vars-managed MACs before making the live
+// call: bootstrapCandidates discards both unconditionally regardless of
+// what IP they resolve to, so enriching them first is a live /stat/user/
+// round-trip spent on a result that's thrown away immediately after.
+//
 // Best-effort and silent on a per-MAC failure: that user's IP just stays
 // empty, same as if we hadn't tried, and bootstrapCandidates' existing
 // no-vlan-signal bucket handles it.
-func enrichObservedIPs(ctx context.Context, api unifiAPI, users []unifi.User) {
+func enrichObservedIPs(ctx context.Context, api unifiAPI, users []unifi.User, guestIDs map[string]struct{}, skipMACs map[string]struct{}) {
 	for i := range users {
 		if users[i].IP != "" {
+			continue
+		}
+		if mac, err := canonicalMAC(users[i].MAC); err == nil {
+			if _, managed := skipMACs[mac]; managed {
+				continue
+			}
+		}
+		if _, isGuest := guestIDs[users[i].NetworkID]; isGuest {
 			continue
 		}
 		if ip := observedIP(ctx, api, unifiSite, users[i].MAC); ip != "" {
