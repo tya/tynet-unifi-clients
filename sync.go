@@ -166,7 +166,13 @@ func stepFor(c Client, existing map[string]*unifi.User, netByVLAN map[int]*unifi
 	// IP-vs-VLAN drift in controller state (not inventory state) is a
 	// warning, not an error: inventory could be right, controller could
 	// have a stale fixed_ip. We surface it so the human notices.
-	if cur.FixedIP != "" && c.IP != "" && cur.FixedIP != c.IP {
+	//
+	// Gated on cur.UseFixedIP: per bootstrapCandidates' derivation rules,
+	// UniFi leaves a dead fixed_ip value in place after UseFixedIP flips to
+	// false (the reservation's own inactive-but-not-cleared state) -- that's
+	// not a live conflict, just stale metadata, so it shouldn't produce a
+	// warning implying one.
+	if cur.UseFixedIP && cur.FixedIP != "" && c.IP != "" && cur.FixedIP != c.IP {
 		step.Warnings = append(step.Warnings,
 			fmt.Sprintf("controller fixed_ip=%s differs from inventory ip=%s", cur.FixedIP, c.IP))
 	}

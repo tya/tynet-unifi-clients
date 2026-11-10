@@ -27,9 +27,9 @@ type unifiAPI interface {
 	//    survives disconnection, but the SDK's typed unifi.User struct has
 	//    no field for it, so going through e.g. GetUserByMAC silently
 	//    drops it for any currently-offline client.
-	//  - Put, by updateUser: User.FixedIP and User.Note are both tagged
-	//    `omitempty`, so unifi.Client's typed UpdateUser can never send an
-	//    explicit empty string to *clear* either field -- json.Marshal
+	//  - Put, by updateUser: User.Name, User.FixedIP, and User.Note are all
+	//    tagged `omitempty`, so unifi.Client's typed UpdateUser can never
+	//    send an explicit empty string to *clear* any of them -- json.Marshal
 	//    drops the key entirely, and the controller's PUT handler merges
 	//    by JSON key presence, so an omitted key just leaves the existing
 	//    value in place. See updateUser's comment for how this was found.
@@ -40,16 +40,17 @@ type unifiAPI interface {
 // updateUser pushes d (an Update step's desired state, with d.ID already
 // set to the existing controller record's ID) to /rest/user/<id> via the
 // generic Put rather than unifi.Client's typed UpdateUser. Needed because
-// FixedIP and Note are both tagged `omitempty` on the SDK's User struct, so
-// a *desired* empty value for either -- exactly what diffUser produces when
-// inventory drops a previously-applied ip: or notes: -- never makes it into
-// the request body; the controller just leaves the stale value in place.
-// Confirmed live against the real controller: a reported-successful apply
-// left a stale fixed_ip untouched, while every non-empty-string / bool
-// field in the same Update landed correctly.
+// Name, FixedIP, and Note are all tagged `omitempty` on the SDK's User
+// struct, so a *desired* empty value for any of them -- exactly what
+// diffUser produces when inventory clears a name, drops a previously-applied
+// ip:, or drops notes: -- never makes it into the request body; the
+// controller just leaves the stale value in place. Confirmed live against
+// the real controller: a reported-successful apply left a stale fixed_ip
+// untouched, while every non-empty-string / bool field in the same Update
+// landed correctly.
 //
-// Re-adding fixed_ip/note to the marshaled body (even when empty) is both
-// necessary and sufficient to make a clear stick: the controller's PUT
+// Re-adding name/fixed_ip/note to the marshaled body (even when empty) is
+// both necessary and sufficient to make a clear stick: the controller's PUT
 // merges by JSON key presence rather than replacing the whole record --
 // confirmed by the fact that fields this reconciler never sets at all
 // (hostname, last_seen, ...) survive a real Update untouched.
@@ -62,6 +63,7 @@ func updateUser(ctx context.Context, api unifiAPI, site string, d *unifi.User) (
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return nil, err
 	}
+	body["name"] = d.Name
 	body["fixed_ip"] = d.FixedIP
 	body["note"] = d.Note
 
