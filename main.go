@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/zoullx/unifi-go/unifi"
@@ -215,6 +216,9 @@ func runApply(args []string) error {
 		return err
 	}
 	if len(limits) > 0 {
+		if unmatched := unmatchedLimits(plan, limits); len(unmatched) > 0 {
+			return fmt.Errorf("--limit matched no inventory client: %s", strings.Join(unmatched, ", "))
+		}
 		plan = filterPlan(plan, limits)
 	}
 	plan.Render(stdout)
@@ -555,8 +559,11 @@ func vlanFromIP(ip string) (int, bool) {
 	if len(parts) != 4 {
 		return 0, false
 	}
-	var third int
-	if _, err := fmt.Sscanf(parts[2], "%d", &third); err != nil {
+	// strconv.Atoi (not fmt.Sscanf) so a malformed octet like "70x" is
+	// rejected outright -- Sscanf("%d", ...) on "70x" succeeds with 70,
+	// silently accepting garbage input as a valid VLAN.
+	third, err := strconv.Atoi(parts[2])
+	if err != nil {
 		return 0, false
 	}
 	if third < 1 || third > 4094 {
@@ -577,38 +584,31 @@ func runPull(args []string) error {
 		return err
 	}
 
-	apiKey, err := requireAPIKey()
+	clients, users, networks, _, err := fetchLiveState(c)
 	if err != nil {
 		return err
 	}
-	api, err := newUnifiClient(c.unifiBase, apiKey, c.insecure)
-	if err != nil {
-		return err
-	}
+	plan := Build(clients, users, networks)
 
-	dir, err := c.resolveInventoryPath()
-	if err != nil {
-		return err
+	// Set-difference, but anchored on Build()'s own skip classification
+	// rather than re-deriving guest/unknown-network membership a second
+	// time: a client Build() would never touch (SkipGuest,
+	// SkipUnknownNetwork) must not count as "inventory-only" just because
+	// it's also absent from the live controller's non-guest user set --
+	// that was a permanent false positive for any guest or
+	// unresolvable-VLAN inventory entry before this fix.
+	skipped := map[string]struct{}{}
+	for _, s := range plan.Steps {
+		if s.Action == SkipGuest || s.Action == SkipUnknownNetwork {
+			skipped[s.MAC] = struct{}{}
+		}
 	}
-	clients, err := loadClients(dir)
-	if err != nil {
-		return err
-	}
-
-	ctx := context.Background()
-	networks, err := api.ListNetwork(ctx, unifiSite)
-	if err != nil {
-		return fmt.Errorf("list networks: %w", err)
-	}
-	users, err := api.ListUser(ctx, unifiSite)
-	if err != nil {
-		return fmt.Errorf("list users: %w", err)
-	}
-
-	// Build sets for set-difference.
 	invSet := map[string]struct{}{}
-	for _, c := range clients {
-		invSet[c.MAC] = struct{}{}
+	for _, cl := range clients {
+		if _, skip := skipped[cl.MAC]; skip {
+			continue
+		}
+		invSet[cl.MAC] = struct{}{}
 	}
 	guestIDs := guestNetworkIDs(networks)
 	ctrlSet := map[string]struct{}{}
@@ -642,7 +642,6 @@ func runPull(args []string) error {
 		fmt.Fprintf(stdout, "controller-only: %s\n", m)
 	}
 
-	plan := Build(clients, users, networks)
 	fmt.Fprintln(stdout, plan.Summary(false))
 
 	if len(invOnly)+len(ctrlOnly) > 0 || plan.HasDrift() {
@@ -652,37 +651,73 @@ func runPull(args []string) error {
 	return nil
 }
 
+// fetchLiveState is the shared "fetch" half of the fetch-and-reconcile
+// prelude used by plan, apply, and pull: API client, inventory clients, and
+// the controller's networks/users. Each caller then does its own reconcile
+// (Build() for plan/apply; Build() plus its own set-diff for pull).
+func fetchLiveState(c *common) (clients []Client, users []unifi.User, networks []unifi.Network, api unifiAPI, err error) {
+	apiKey, err := requireAPIKey()
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	api, err = newUnifiClient(c.unifiBase, apiKey, c.insecure)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	dir, err := c.resolveInventoryPath()
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	clients, err = loadClients(dir)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	ctx := context.Background()
+	networks, err = api.ListNetwork(ctx, unifiSite)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("list networks: %w", err)
+	}
+	users, err = api.ListUser(ctx, unifiSite)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("list users: %w", err)
+	}
+	return clients, users, networks, api, nil
+}
+
 // buildPlanFromLive is the shared "fetch + reconcile" prelude used by plan
 // and apply. Returns the plan plus the live API client (apply needs it for
 // writes).
 func buildPlanFromLive(c *common) (Plan, unifiAPI, error) {
-	apiKey, err := requireAPIKey()
+	clients, users, networks, api, err := fetchLiveState(c)
 	if err != nil {
 		return Plan{}, nil, err
-	}
-	api, err := newUnifiClient(c.unifiBase, apiKey, c.insecure)
-	if err != nil {
-		return Plan{}, nil, err
-	}
-	dir, err := c.resolveInventoryPath()
-	if err != nil {
-		return Plan{}, nil, err
-	}
-	clients, err := loadClients(dir)
-	if err != nil {
-		return Plan{}, nil, err
-	}
-
-	ctx := context.Background()
-	networks, err := api.ListNetwork(ctx, unifiSite)
-	if err != nil {
-		return Plan{}, nil, fmt.Errorf("list networks: %w", err)
-	}
-	users, err := api.ListUser(ctx, unifiSite)
-	if err != nil {
-		return Plan{}, nil, fmt.Errorf("list users: %w", err)
 	}
 	return Build(clients, users, networks), api, nil
+}
+
+// unmatchedLimits returns, among the --limit values the operator supplied,
+// any that canonicalMAC rejects or that don't correspond to a tracked
+// inventory client at all. Without this, a typo'd --limit silently produces
+// "nothing to apply" -- identical output to the MAC already being in sync
+// -- in a tool whose whole job is pushing changes to live network infra.
+func unmatchedLimits(p Plan, limits []string) []string {
+	have := map[string]struct{}{}
+	for _, s := range p.Steps {
+		have[s.MAC] = struct{}{}
+	}
+	var unmatched []string
+	for _, l := range limits {
+		canon, err := canonicalMAC(l)
+		if err != nil {
+			unmatched = append(unmatched, l)
+			continue
+		}
+		if _, ok := have[canon]; !ok {
+			unmatched = append(unmatched, l)
+		}
+	}
+	return unmatched
 }
 
 // filterPlan returns a new Plan containing only steps whose MAC is in limits.

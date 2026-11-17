@@ -26,14 +26,17 @@ Four subcommands, all sharing the same fetch-and-reconcile prelude:
 make test          # go test -race ./...
 make test-cover    # writes coverage.out + coverage.html
 make build         # → bin/tynet-unifi-clients (host arch)
-make lint          # go vet + go fmt
+make lint          # go vet + go fmt + golangci-lint
 ```
 
 Run a single test: `go test -race -run TestBuild_Update ./...` (single package
 — there are no subpackages, see below).
 
 `.golangci.yml` enables `errcheck`, `govet`, `ineffassign`, `staticcheck`,
-`unused`, `gofmt`, `misspell`.
+`unused`, `gofmt`, `misspell` — `make lint` actually runs `golangci-lint`
+now (previously `.golangci.yml` existed but nothing invoked it). CI itself
+still only runs `go vet` + `gofmt -l` + `go test -race` (`.github/workflows/ci.yml`);
+`golangci-lint` isn't wired into CI, just the local `make lint` target.
 
 ## Architecture
 
