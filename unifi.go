@@ -108,6 +108,9 @@ func observedIP(ctx context.Context, api unifiAPI, site, mac string) string {
 // VerifySSL=false matches the existing playbook's validate_certs: false.
 // ValidationMode=Disable matches radius-user-importer's choice.
 //
+// Wrapped in patchedClient (see its doc comment) to work around a live
+// controller/SDK incompatibility in ListUser.
+//
 // Declared as a var so tests can swap in a fake unifiAPI without standing up
 // an HTTP server.
 var newUnifiClient = func(baseURL, apiKey string, insecure bool) (unifiAPI, error) {
@@ -120,7 +123,50 @@ var newUnifiClient = func(baseURL, apiKey string, insecure bool) (unifiAPI, erro
 	if err != nil {
 		return nil, fmt.Errorf("create unifi client: %w", err)
 	}
-	return c, nil
+	return &patchedClient{unifiAPI: c}, nil
+}
+
+// patchedClient wraps a real unifiAPI client and overrides ListUser to
+// route around a live controller/SDK incompatibility: as of some recent
+// UniFi Network app update, a client's dev_id_override now sometimes comes
+// back as a JSON string (e.g. "2749") instead of the int
+// github.com/zoullx/unifi-go v0.0.8 (the latest release; no newer version
+// exists) expects. Since the SDK's User.UnmarshalJSON unmarshals the whole
+// /rest/user response as one batch, ONE such record fails the entire
+// ListUser call -- confirmed live affecting 62 of 159 clients on this
+// controller, meaning ListUser was failing on essentially every real call.
+//
+// dev_id_override isn't used anywhere in this tool, so the fix is to fetch
+// the raw response via the generic Get escape hatch, strip that field
+// unconditionally before decoding each record, and unmarshal into
+// unifi.User ourselves. Every other unifiAPI method (ListNetwork,
+// CreateUser, Get, Put) is unaffected and passes straight through via the
+// embedded real client.
+type patchedClient struct {
+	unifiAPI
+}
+
+func (p *patchedClient) ListUser(ctx context.Context, site string) ([]unifi.User, error) {
+	var raw struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := p.unifiAPI.Get(ctx, fmt.Sprintf("s/%s/rest/user", site), nil, &raw); err != nil {
+		return nil, err
+	}
+	users := make([]unifi.User, 0, len(raw.Data))
+	for _, m := range raw.Data {
+		delete(m, "dev_id_override")
+		b, err := json.Marshal(m)
+		if err != nil {
+			return nil, fmt.Errorf("remarshal user record: %w", err)
+		}
+		var u unifi.User
+		if err := json.Unmarshal(b, &u); err != nil {
+			return nil, fmt.Errorf("unmarshal user record: %w", err)
+		}
+		users = append(users, u)
+	}
+	return users, nil
 }
 
 // guestNetworkIDs returns the set of network IDs whose Purpose is "guest".
