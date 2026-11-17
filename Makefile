@@ -44,7 +44,11 @@ vet: ## Run go vet
 	$(GO) vet ./...
 
 .PHONY: lint
-lint: vet fmt ## Run formatting + vet
+lint: vet fmt golangci-lint ## Run formatting + vet + golangci-lint
+
+.PHONY: golangci-lint
+golangci-lint: ## Run golangci-lint (errcheck, staticcheck, unused, ineffassign, misspell -- see .golangci.yml)
+	golangci-lint run ./...
 
 .PHONY: tidy
 tidy: ## Clean up go.mod / go.sum

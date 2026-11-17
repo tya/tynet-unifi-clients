@@ -602,12 +602,45 @@ func TestRunApply_Limit(t *testing.T) {
 		"--inventory-path", dir,
 		"--yes", "--allow-large",
 		"--limit", "aa:bb:cc:dd:ee:ff",
-		"--limit", "not-a-mac", // dropped by canonicalMAC
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.created) != 1 || fake.created[0].MAC != "aa:bb:cc:dd:ee:ff" {
 		t.Errorf("limit should restrict to one MAC, got %v", fake.created)
+	}
+}
+
+func TestRunApply_LimitUnmatchedErrors(t *testing.T) {
+	// A --limit that matches nothing at all (bad format, or a MAC not
+	// tracked in inventory) must error, not silently behave like "already
+	// in sync" -- this is a tool that mutates live network infra, and a
+	// typo'd --limit silently doing nothing is a dangerous false negative.
+	fake := &fakeUnifiAPI{networks: defaultNetworks()}
+	swapGlobals(t, fake, "")
+	dir := writeInventory(t, map[string]string{
+		"aa-bb-cc-dd-ee-ff.yml": "mac: aa:bb:cc:dd:ee:ff\nname: alice\nvlan_id: 70\n",
+	})
+	cases := []struct {
+		name  string
+		limit string
+	}{
+		{"malformed", "not-a-mac"},
+		{"well-formed but not in inventory", "11:22:33:44:55:66"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runApply([]string{
+				"--inventory-path", dir,
+				"--yes", "--allow-large",
+				"--limit", tc.limit,
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.limit) {
+				t.Fatalf("want error naming unmatched limit %q, got %v", tc.limit, err)
+			}
+			if len(fake.created) != 0 {
+				t.Errorf("want no writes for an unmatched limit, got %v", fake.created)
+			}
+		})
 	}
 }
 
@@ -1068,6 +1101,41 @@ func TestRunPull_GarbageMACSkipped(t *testing.T) {
 	dir := writeInventory(t, nil)
 	if err := runPull([]string{"--inventory-path", dir}); err != nil {
 		t.Fatalf("garbage MAC should not error, got %v", err)
+	}
+}
+
+func TestRunPull_InventoryGuestClientNotInventoryOnly(t *testing.T) {
+	// Regression test: an inventory client whose vlan_id resolves to a
+	// guest network is exactly what Build() marks SkipGuest -- plan/apply
+	// never touch it. Before this fix, runPull's invSet included it
+	// unconditionally while the live controller's guest-filtered ctrlSet
+	// never would, so it was permanently reported as "inventory-only"
+	// drift with no way to resolve it (the CI cron's core failure mode).
+	env := swapGlobals(t, &fakeUnifiAPI{networks: defaultNetworks()}, "")
+	dir := writeInventory(t, map[string]string{
+		"aa-bb-cc-dd-ee-ff.yml": "mac: aa:bb:cc:dd:ee:ff\nname: burner\nvlan_id: 99\n", // net-99 is guest
+	})
+	if err := runPull([]string{"--inventory-path", dir}); err != nil {
+		t.Fatalf("guest-VLAN inventory client should not be reported as drift, got %v", err)
+	}
+	if strings.Contains(env.out.String(), "inventory-only:") {
+		t.Errorf("want no inventory-only line for a guest-VLAN client, got %q", env.out.String())
+	}
+}
+
+func TestRunPull_InventoryUnknownNetworkClientNotInventoryOnly(t *testing.T) {
+	// Same class of bug as the guest case above, for SkipUnknownNetwork:
+	// an inventory client whose vlan_id doesn't resolve to any controller
+	// network must not be reported as "inventory-only" drift either.
+	env := swapGlobals(t, &fakeUnifiAPI{networks: defaultNetworks()}, "")
+	dir := writeInventory(t, map[string]string{
+		"aa-bb-cc-dd-ee-ff.yml": "mac: aa:bb:cc:dd:ee:ff\nname: ghost\nvlan_id: 200\n", // no such network
+	})
+	if err := runPull([]string{"--inventory-path", dir}); err != nil {
+		t.Fatalf("unresolvable-VLAN inventory client should not be reported as drift, got %v", err)
+	}
+	if strings.Contains(env.out.String(), "inventory-only:") {
+		t.Errorf("want no inventory-only line for an unresolvable-VLAN client, got %q", env.out.String())
 	}
 }
 

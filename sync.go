@@ -121,6 +121,7 @@ func stepFor(c Client, existing map[string]*unifi.User, netByVLAN map[int]*unifi
 		return Step{
 			MAC:     c.MAC,
 			Action:  SkipUnknownNetwork,
+			Desired: unifi.User{Name: c.Name},
 			Reasons: []string{fmt.Sprintf("no controller network with vlan=%d", c.VLANID)},
 		}
 	}
@@ -128,6 +129,7 @@ func stepFor(c Client, existing map[string]*unifi.User, netByVLAN map[int]*unifi
 		return Step{
 			MAC:     c.MAC,
 			Action:  SkipGuest,
+			Desired: unifi.User{Name: c.Name},
 			Reasons: []string{fmt.Sprintf("vlan %d resolves to guest network %q", c.VLANID, net.Name)},
 		}
 	}

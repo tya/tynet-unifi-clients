@@ -17,7 +17,7 @@ WPA-PSK wireless clients may not** until a follow-up PPSK or RADIUS rollout.
 ```
 UNIFI_API_KEY=... tynet-unifi-clients <subcommand>
 
-  plan       Diff inventory vs controller; exit 2 if drift.  (default)
+  plan       Diff inventory vs controller; exit 2 if drift.
   apply      Push inventory → controller.  Prompts unless --yes.
   bootstrap  Seed inventory/clients/ from the controller's current client list.
   pull       Read-only drift report suitable for CI cron.
