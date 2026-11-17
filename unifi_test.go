@@ -111,6 +111,37 @@ func TestPatchedClient_ListUserToleratesStringDevIDOverride(t *testing.T) {
 	}
 }
 
+func TestPatchedClient_CreateUserToleratesStringDevIDOverride(t *testing.T) {
+	// Same bug, second call site: confirmed live that the controller
+	// echoes the new record's dev_id_override back as a string in the
+	// create response too, breaking the SDK's typed CreateUser the exact
+	// same way. patchedClient.CreateUser mirrors the SDK's own nested
+	// objects/data response shape but decodes via decodeUserRecord.
+	fake := &fakeUnifiAPI{postRespByPath: map[string]string{
+		"s/default/group/user": `{"data":[
+			{"data":[{"mac":"aa:bb:cc:dd:ee:ff","name":"alice","dev_id_override":"2749"}]}
+		]}`,
+	}}
+	p := &patchedClient{unifiAPI: fake}
+	got, err := p.CreateUser(context.Background(), "default", &unifi.User{MAC: "aa:bb:cc:dd:ee:ff", Name: "alice"})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if got.MAC != "aa:bb:cc:dd:ee:ff" || got.Name != "alice" {
+		t.Errorf("want aa:bb:cc:dd:ee:ff/alice, got %+v", got)
+	}
+}
+
+func TestPatchedClient_CreateUserMalformedResponse(t *testing.T) {
+	fake := &fakeUnifiAPI{postRespByPath: map[string]string{
+		"s/default/group/user": `{"data":[]}`,
+	}}
+	p := &patchedClient{unifiAPI: fake}
+	if _, err := p.CreateUser(context.Background(), "default", &unifi.User{MAC: "aa:bb:cc:dd:ee:ff"}); err == nil {
+		t.Fatal("want error for empty data, got nil")
+	}
+}
+
 func TestNewUnifiClient_InvalidConfig(t *testing.T) {
 	// Empty URL fails the `validate:"required,http_url"` constraint on
 	// ClientConfig.URL before any HTTP is attempted. Covers the error-wrap
