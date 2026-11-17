@@ -20,9 +20,9 @@ type unifiAPI interface {
 	ListNetwork(ctx context.Context, site string) ([]unifi.Network, error)
 	ListUser(ctx context.Context, site string) ([]unifi.User, error)
 	CreateUser(ctx context.Context, site string, d *unifi.User) (*unifi.User, error)
-	// Get and Put are the SDK's generic REST escape hatches. Used directly
-	// (rather than typed wrappers) in two places where the typed path
-	// silently drops data:
+	// Get, Put, and Post are the SDK's generic REST escape hatches. Used
+	// directly (rather than typed wrappers) in several places where the
+	// typed path silently drops data or outright fails to decode:
 	//  - Get, by observedIP: /stat/user/<mac> carries a last_ip field that
 	//    survives disconnection, but the SDK's typed unifi.User struct has
 	//    no field for it, so going through e.g. GetUserByMAC silently
@@ -33,8 +33,32 @@ type unifiAPI interface {
 	//    drops the key entirely, and the controller's PUT handler merges
 	//    by JSON key presence, so an omitted key just leaves the existing
 	//    value in place. See updateUser's comment for how this was found.
+	//  - Get and Post, by patchedClient's ListUser/CreateUser overrides:
+	//    both the typed ListUser and CreateUser fail outright decoding any
+	//    response containing a client whose dev_id_override is a JSON
+	//    string instead of the int the SDK expects. See patchedClient's
+	//    doc comment.
 	Get(ctx context.Context, apiPath string, reqBody, respBody interface{}) error
 	Put(ctx context.Context, apiPath string, reqBody, respBody interface{}) error
+	Post(ctx context.Context, apiPath string, reqBody, respBody interface{}) error
+}
+
+// decodeUserRecord unmarshals a single raw controller user record (as
+// decoded into a generic map, from any /rest/user- or /group/user-shaped
+// response) into unifi.User, stripping dev_id_override first. Shared by
+// every place this tool decodes a raw user record from the controller --
+// see patchedClient's doc comment for why that field needs stripping.
+func decodeUserRecord(m map[string]any) (unifi.User, error) {
+	delete(m, "dev_id_override")
+	b, err := json.Marshal(m)
+	if err != nil {
+		return unifi.User{}, fmt.Errorf("remarshal user record: %w", err)
+	}
+	var u unifi.User
+	if err := json.Unmarshal(b, &u); err != nil {
+		return unifi.User{}, fmt.Errorf("unmarshal user record: %w", err)
+	}
+	return u, nil
 }
 
 // updateUser pushes d (an Update step's desired state, with d.ID already
@@ -54,6 +78,14 @@ type unifiAPI interface {
 // merges by JSON key presence rather than replacing the whole record --
 // confirmed by the fact that fields this reconciler never sets at all
 // (hostname, last_seen, ...) survive a real Update untouched.
+//
+// The response is decoded via decodeUserRecord, not json.Unmarshal into
+// []unifi.User directly, for a second, unrelated reason: the controller's
+// PUT response for a given client includes that client's own
+// dev_id_override, which fails the SDK's typed decode exactly like
+// patchedClient's ListUser/CreateUser overrides -- confirmed live: this
+// broke the very first real Update this tool attempted after ListUser was
+// fixed.
 func updateUser(ctx context.Context, api unifiAPI, site string, d *unifi.User) (*unifi.User, error) {
 	raw, err := json.Marshal(d)
 	if err != nil {
@@ -68,7 +100,7 @@ func updateUser(ctx context.Context, api unifiAPI, site string, d *unifi.User) (
 	body["note"] = d.Note
 
 	var resp struct {
-		Data []unifi.User `json:"data"`
+		Data []map[string]any `json:"data"`
 	}
 	if err := api.Put(ctx, fmt.Sprintf("s/%s/rest/user/%s", site, d.ID), body, &resp); err != nil {
 		return nil, err
@@ -76,7 +108,11 @@ func updateUser(ctx context.Context, api unifiAPI, site string, d *unifi.User) (
 	if len(resp.Data) != 1 {
 		return nil, fmt.Errorf("update user %s: unexpected response shape", d.MAC)
 	}
-	return &resp.Data[0], nil
+	u, err := decodeUserRecord(resp.Data[0])
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
 
 // observedIP returns the best available current-or-last-known IP for mac
@@ -126,22 +162,27 @@ var newUnifiClient = func(baseURL, apiKey string, insecure bool) (unifiAPI, erro
 	return &patchedClient{unifiAPI: c}, nil
 }
 
-// patchedClient wraps a real unifiAPI client and overrides ListUser to
-// route around a live controller/SDK incompatibility: as of some recent
-// UniFi Network app update, a client's dev_id_override now sometimes comes
-// back as a JSON string (e.g. "2749") instead of the int
+// patchedClient wraps a real unifiAPI client and overrides ListUser and
+// CreateUser to route around a live controller/SDK incompatibility: as of
+// some recent UniFi Network app update, a client's dev_id_override now
+// sometimes comes back as a JSON string (e.g. "2749") instead of the int
 // github.com/zoullx/unifi-go v0.0.8 (the latest release; no newer version
-// exists) expects. Since the SDK's User.UnmarshalJSON unmarshals the whole
-// /rest/user response as one batch, ONE such record fails the entire
-// ListUser call -- confirmed live affecting 62 of 159 clients on this
-// controller, meaning ListUser was failing on essentially every real call.
+// exists) expects. Both the typed ListUser and CreateUser decode their
+// response as a batch that includes this field, so ONE such record in
+// either response fails the whole call -- confirmed live affecting 62 of
+// 159 clients for ListUser, meaning it was failing on essentially every
+// real call, and confirmed live for CreateUser too: the controller echoes
+// the new record's dev_id_override back in the creation response.
+// (updateUser has the same problem for its own PUT response, but since it
+// already bypasses the typed UpdateUser for an unrelated omitempty reason,
+// it decodes via the shared decodeUserRecord directly rather than needing
+// a patchedClient override.)
 //
 // dev_id_override isn't used anywhere in this tool, so the fix is to fetch
-// the raw response via the generic Get escape hatch, strip that field
-// unconditionally before decoding each record, and unmarshal into
-// unifi.User ourselves. Every other unifiAPI method (ListNetwork,
-// CreateUser, Get, Put) is unaffected and passes straight through via the
-// embedded real client.
+// each response via the generic Get/Post escape hatch and decode every
+// record via decodeUserRecord, which strips the field before unmarshaling.
+// Every other unifiAPI method (ListNetwork, Get, Put) is unaffected and
+// passes straight through via the embedded real client.
 type patchedClient struct {
 	unifiAPI
 }
@@ -155,18 +196,44 @@ func (p *patchedClient) ListUser(ctx context.Context, site string) ([]unifi.User
 	}
 	users := make([]unifi.User, 0, len(raw.Data))
 	for _, m := range raw.Data {
-		delete(m, "dev_id_override")
-		b, err := json.Marshal(m)
+		u, err := decodeUserRecord(m)
 		if err != nil {
-			return nil, fmt.Errorf("remarshal user record: %w", err)
-		}
-		var u unifi.User
-		if err := json.Unmarshal(b, &u); err != nil {
-			return nil, fmt.Errorf("unmarshal user record: %w", err)
+			return nil, err
 		}
 		users = append(users, u)
 	}
 	return users, nil
+}
+
+// CreateUser mirrors the SDK's own request shape (see unifi-go's
+// user.generated.go CreateUser) but decodes the response via
+// decodeUserRecord instead of unmarshaling into []unifi.User directly.
+func (p *patchedClient) CreateUser(ctx context.Context, site string, d *unifi.User) (*unifi.User, error) {
+	reqBody := struct {
+		Objects []struct {
+			Data *unifi.User `json:"data"`
+		} `json:"objects"`
+	}{
+		Objects: []struct {
+			Data *unifi.User `json:"data"`
+		}{{Data: d}},
+	}
+	var respBody struct {
+		Data []struct {
+			Data []map[string]any `json:"data"`
+		} `json:"data"`
+	}
+	if err := p.unifiAPI.Post(ctx, fmt.Sprintf("s/%s/group/user", site), reqBody, &respBody); err != nil {
+		return nil, err
+	}
+	if len(respBody.Data) != 1 || len(respBody.Data[0].Data) != 1 {
+		return nil, errors.New("malformed group response")
+	}
+	u, err := decodeUserRecord(respBody.Data[0].Data[0])
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
 
 // guestNetworkIDs returns the set of network IDs whose Purpose is "guest".

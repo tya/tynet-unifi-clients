@@ -26,12 +26,18 @@ type fakeUnifiAPI struct {
 	createErr   error
 	updateErr   error
 
+	putRespOverride string // see Put's doc comment
+
 	// getRespByPath backs Get, keyed by the exact apiPath observedIP builds
 	// ("s/<site>/stat/user/<mac>"). Unset entries return errNotFoundFake,
 	// matching "no live IP available" -- the same outcome as a real 404 or
 	// an empty data array.
 	getRespByPath map[string]string // apiPath -> raw JSON to unmarshal into respBody
 	getCalls      []string          // every apiPath Get was actually invoked with, for "was this skipped" assertions
+
+	// postRespByPath backs Post, same shape/semantics as getRespByPath --
+	// used by patchedClient.CreateUser's regression test.
+	postRespByPath map[string]string
 }
 
 var errNotFoundFake = errors.New("fake: not found")
@@ -39,6 +45,14 @@ var errNotFoundFake = errors.New("fake: not found")
 func (f *fakeUnifiAPI) Get(_ context.Context, apiPath string, _ interface{}, respBody interface{}) error {
 	f.getCalls = append(f.getCalls, apiPath)
 	raw, ok := f.getRespByPath[apiPath]
+	if !ok {
+		return errNotFoundFake
+	}
+	return json.Unmarshal([]byte(raw), respBody)
+}
+
+func (f *fakeUnifiAPI) Post(_ context.Context, apiPath string, _ interface{}, respBody interface{}) error {
+	raw, ok := f.postRespByPath[apiPath]
 	if !ok {
 		return errNotFoundFake
 	}
@@ -91,6 +105,14 @@ func (f *fakeUnifiAPI) Put(_ context.Context, _ string, reqBody interface{}, res
 		return err
 	}
 	f.updated = append(f.updated, u)
+
+	// putRespOverride, when set, returns this raw JSON directly instead
+	// of echoing the request -- used to simulate a response shape the
+	// echo logic couldn't produce itself, e.g. a dev_id_override the
+	// request body never has.
+	if f.putRespOverride != "" {
+		return json.Unmarshal([]byte(f.putRespOverride), respBody)
+	}
 
 	wrapper := struct {
 		Data []unifi.User `json:"data"`
@@ -741,6 +763,26 @@ func TestUpdateUser_ClearsNameFixedIPAndNoteExplicitly(t *testing.T) {
 		} else if v != "" {
 			t.Errorf("want %s=\"\", got %v", field, v)
 		}
+	}
+}
+
+func TestUpdateUser_ToleratesStringDevIDOverrideInResponse(t *testing.T) {
+	// Regression test: confirmed live that the controller's PUT response
+	// for a client includes that client's own dev_id_override, which can
+	// be a string -- breaking a naive json.Unmarshal into []unifi.User the
+	// same way ListUser/CreateUser were broken. This was the very first
+	// real Update this tool attempted after ListUser was fixed: a
+	// reported-successful-looking apply actually failed decoding the PUT
+	// response.
+	fake := &fakeUnifiAPI{
+		putRespOverride: `{"data":[{"mac":"aa:bb:cc:dd:ee:ff","name":"alice","dev_id_override":"2749"}]}`,
+	}
+	got, err := updateUser(context.Background(), fake, "default", &unifi.User{ID: "u1", MAC: "aa:bb:cc:dd:ee:ff", Name: "alice"})
+	if err != nil {
+		t.Fatalf("updateUser: %v", err)
+	}
+	if got.MAC != "aa:bb:cc:dd:ee:ff" || got.Name != "alice" {
+		t.Errorf("want aa:bb:cc:dd:ee:ff/alice, got %+v", got)
 	}
 }
 
