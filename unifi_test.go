@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -76,6 +77,37 @@ func TestNetworkBySubnet_NotFound(t *testing.T) {
 	_, err := networkBySubnet(nets, "10.0.70.0/24")
 	if err == nil {
 		t.Fatal("want error, got nil")
+	}
+}
+
+func TestPatchedClient_ListUserToleratesStringDevIDOverride(t *testing.T) {
+	// Regression test: confirmed live that the controller sometimes
+	// returns dev_id_override as a JSON string ("2749") rather than the
+	// int the SDK's generated User struct expects, and since
+	// User.UnmarshalJSON decodes the whole /rest/user batch at once, ONE
+	// such record breaks ListUser entirely -- seen live affecting 62 of
+	// 159 clients. patchedClient.ListUser must tolerate this (we never
+	// read dev_id_override) and still decode every record, including the
+	// fields we actually care about.
+	fake := &fakeUnifiAPI{getRespByPath: map[string]string{
+		"s/default/rest/user": `{"data":[
+			{"mac":"aa:bb:cc:dd:ee:ff","name":"alice","dev_id_override":"2749"},
+			{"mac":"11:22:33:44:55:66","name":"bob","dev_id_override":2791}
+		]}`,
+	}}
+	p := &patchedClient{unifiAPI: fake}
+	users, err := p.ListUser(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("ListUser: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("want 2 users, got %d", len(users))
+	}
+	if users[0].MAC != "aa:bb:cc:dd:ee:ff" || users[0].Name != "alice" {
+		t.Errorf("string dev_id_override record: want aa:bb:cc:dd:ee:ff/alice, got %+v", users[0])
+	}
+	if users[1].MAC != "11:22:33:44:55:66" || users[1].Name != "bob" {
+		t.Errorf("int dev_id_override record: want 11:22:33:44:55:66/bob, got %+v", users[1])
 	}
 }
 
