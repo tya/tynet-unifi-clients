@@ -142,6 +142,28 @@ func TestPatchedClient_CreateUserMalformedResponse(t *testing.T) {
 	}
 }
 
+func TestPatchedClient_CreateUserSurfacesServerError(t *testing.T) {
+	// HTTP 200 batch envelope, but the per-item Meta reports a real failure
+	// (duplicate MAC, validation error, license limit, etc.) and data is
+	// empty -- exactly how the real SDK's CreateUser surfaces this case via
+	// Meta.error(). Before this fix, patchedClient.CreateUser had no field
+	// for Meta at all, so this fell through to a bare "malformed group
+	// response" with no hint of the actual server-reported reason.
+	fake := &fakeUnifiAPI{postRespByPath: map[string]string{
+		"s/default/group/user": `{"data":[
+			{"Meta":{"rc":"error","msg":"api.err.MacUsed"},"data":[]}
+		]}`,
+	}}
+	p := &patchedClient{unifiAPI: fake}
+	_, err := p.CreateUser(context.Background(), "default", &unifi.User{MAC: "aa:bb:cc:dd:ee:ff"})
+	if err == nil {
+		t.Fatal("want error for Meta.rc != ok, got nil")
+	}
+	if !strings.Contains(err.Error(), "api.err.MacUsed") {
+		t.Errorf("want the server's actual message surfaced, got: %v", err)
+	}
+}
+
 func TestNewUnifiClient_InvalidConfig(t *testing.T) {
 	// Empty URL fails the `validate:"required,http_url"` constraint on
 	// ClientConfig.URL before any HTTP is attempted. Covers the error-wrap

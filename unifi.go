@@ -208,6 +208,23 @@ func (p *patchedClient) ListUser(ctx context.Context, site string) ([]unifi.User
 // CreateUser mirrors the SDK's own request shape (see unifi-go's
 // user.generated.go CreateUser) but decodes the response via
 // decodeUserRecord instead of unmarshaling into []unifi.User directly.
+//
+// Also captures the per-item Meta the real SDK's CreateUser checks (see
+// user.go's `respBody.Data[0].Meta.error()`) -- without it, a real
+// per-record failure (duplicate MAC, validation error, license limit,
+// etc.) that comes back as an HTTP-200 batch envelope with
+// data[0].Meta.rc != "ok" and an empty data[0].data was indistinguishable
+// from this function's own generic "malformed group response", hiding the
+// actual server-reported reason from the operator.
+//
+// Meta.error() itself isn't reusable here (it's unexported), so the
+// equivalent check is inlined. Deliberately NOT mirroring the SDK's
+// stricter unconditional "RC must equal ok" check: the confirmed-live
+// success response for this endpoint omits the Meta key at this level
+// entirely (see TestPatchedClient_CreateUserToleratesStringDevIDOverride's
+// fixture), so requiring RC == "ok" would misreport every real success as
+// an error. Only an explicitly-present, non-"ok" RC is treated as a
+// failure; an absent one falls through to the existing data-shape check.
 func (p *patchedClient) CreateUser(ctx context.Context, site string, d *unifi.User) (*unifi.User, error) {
 	reqBody := struct {
 		Objects []struct {
@@ -220,13 +237,20 @@ func (p *patchedClient) CreateUser(ctx context.Context, site string, d *unifi.Us
 	}
 	var respBody struct {
 		Data []struct {
+			Meta unifi.Meta       `json:"Meta"`
 			Data []map[string]any `json:"data"`
 		} `json:"data"`
 	}
 	if err := p.unifiAPI.Post(ctx, fmt.Sprintf("s/%s/group/user", site), reqBody, &respBody); err != nil {
 		return nil, err
 	}
-	if len(respBody.Data) != 1 || len(respBody.Data[0].Data) != 1 {
+	if len(respBody.Data) != 1 {
+		return nil, errors.New("malformed group response")
+	}
+	if rc := respBody.Data[0].Meta.RC; rc != "" && rc != "ok" {
+		return nil, &unifi.ServerError{ErrorCode: rc, Message: respBody.Data[0].Meta.Message}
+	}
+	if len(respBody.Data[0].Data) != 1 {
 		return nil, errors.New("malformed group response")
 	}
 	u, err := decodeUserRecord(respBody.Data[0].Data[0])
